@@ -212,14 +212,14 @@ export default function CheckResult() {
           <table className="results-table">
             <thead>
               <tr>
-                <th onClick={() => handleSort("url")}>URL{sortArrow("url")}</th>
-                <th onClick={() => handleSort("verdict")}>Status{sortArrow("verdict")}</th>
-                <th onClick={() => handleSort("coverage_state")}>Coverage{sortArrow("coverage_state")}</th>
-                <th onClick={() => handleSort("last_crawl_time")}>Last Crawl{sortArrow("last_crawl_time")}</th>
-                <th onClick={() => handleSort("crawled_as")}>Agent{sortArrow("crawled_as")}</th>
-                <th onClick={() => handleSort("deindex_count")}>Deindex #{sortArrow("deindex_count")}</th>
-                <th>Canonical</th>
-                <th>Changed</th>
+                <th style={{ width: "35%" }} onClick={() => handleSort("url")}>URL{sortArrow("url")}</th>
+                <th style={{ width: "8%" }} onClick={() => handleSort("verdict")}>Status{sortArrow("verdict")}</th>
+                <th style={{ width: "12%" }} onClick={() => handleSort("coverage_state")}>Coverage{sortArrow("coverage_state")}</th>
+                <th style={{ width: "10%" }} onClick={() => handleSort("last_crawl_time")}>Last Crawl{sortArrow("last_crawl_time")}</th>
+                <th style={{ width: "8%" }} onClick={() => handleSort("crawled_as")}>Agent{sortArrow("crawled_as")}</th>
+                <th style={{ width: "9%" }} onClick={() => handleSort("deindex_count")}>Deindex #{sortArrow("deindex_count")}</th>
+                <th style={{ width: "9%" }}>Canonical</th>
+                <th style={{ width: "9%" }}>Changed</th>
               </tr>
             </thead>
             <tbody>

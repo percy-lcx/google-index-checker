@@ -12,7 +12,7 @@ function App() {
         <header className="app-header">
           <Link to="/" className="logo">GSC Indexation Checker</Link>
           <nav>
-            <Link to="/">New Check</Link>
+            <Link to="/">Check URLs</Link>
             <Link to="/history">History</Link>
           </nav>
         </header>

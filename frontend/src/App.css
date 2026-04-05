@@ -261,6 +261,7 @@ textarea:focus {
   width: 100%;
   border-collapse: collapse;
   font-size: 13px;
+  table-layout: fixed;
 }
 
 .results-table th {
@@ -281,10 +282,25 @@ textarea:focus {
 .results-table td {
   padding: 10px 12px;
   border-bottom: 1px solid #f3f4f6;
-  max-width: 300px;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+}
+
+.results-table td:first-child {
+  word-break: break-all;
+  white-space: normal;
+  text-overflow: unset;
+}
+
+.results-table th,
+.results-table td {
+  position: relative;
+}
+
+.results-table th {
+  resize: horizontal;
+  overflow: hidden;
+  min-width: 60px;
 }
 
 .results-table tr:hover {
