@@ -146,7 +146,7 @@ export default function CheckResult() {
 
       {/* Summary */}
       <div className="summary-bar">
-        <div className="summary-card">
+        <div className={`summary-card clickable${statusFilter === "all" && !changedOnly ? " active" : ""}`} onClick={() => { setStatusFilter("all"); setChangedOnly(false); }}>
           <div className="label">Total</div>
           <div className="value">{total}</div>
         </div>
