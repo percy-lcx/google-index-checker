@@ -110,3 +110,33 @@ async def force_quota_exhausted(db: aiosqlite.Connection):
         (today, DAILY_QUOTA_LIMIT, DAILY_QUOTA_LIMIT),
     )
     await db.commit()
+
+
+async def seed_quota_from_results():
+    """One-time migration: if quota_usage has no row for today, seed it from existing results."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    db = await get_db()
+    try:
+        cursor = await db.execute("SELECT used FROM quota_usage WHERE date = ?", (today,))
+        row = await cursor.fetchone()
+        if row is not None:
+            return  # Already tracking today
+
+        # Count today's results from the results table as a best-effort seed
+        cursor = await db.execute(
+            """SELECT COUNT(*) FROM results r
+               JOIN checks c ON r.check_id = c.id
+               WHERE c.created_at >= ?""",
+            (today_start,),
+        )
+        count_row = await cursor.fetchone()
+        count = count_row[0] if count_row else 0
+        if count > 0:
+            await db.execute(
+                "INSERT OR IGNORE INTO quota_usage (date, used) VALUES (?, ?)",
+                (today, count),
+            )
+            await db.commit()
+    finally:
+        await db.close()

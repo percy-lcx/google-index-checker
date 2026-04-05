@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from config import GSC_PROPERTY_URL, DAILY_QUOTA_LIMIT
-from database import init_db, get_db, get_daily_quota_used, run_retention_cleanup
+from database import init_db, get_db, get_daily_quota_used, run_retention_cleanup, seed_quota_from_results
 from inspection import run_inspection, progress_store
 
 logging.basicConfig(level=logging.INFO)
@@ -34,6 +34,7 @@ app.add_middleware(
 async def startup():
     await init_db()
     await run_retention_cleanup()
+    await seed_quota_from_results()
     logger.info("Database initialized and retention cleanup complete.")
 
 
