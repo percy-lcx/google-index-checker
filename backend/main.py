@@ -70,14 +70,9 @@ def clean_url_list(raw_urls: list[str]) -> list[str]:
 # --- Endpoints ---
 
 @app.post("/api/checks")
-async def create_check(request: Optional[CheckRequest] = None, file: Optional[UploadFile] = File(None)):
+async def create_check(request: CheckRequest):
     """Submit URL list to start an inspection run."""
-    urls = []
-    if request and request.urls:
-        urls = request.urls
-    elif file:
-        content = await file.read()
-        urls = content.decode("utf-8").splitlines()
+    urls = request.urls
 
     if not urls:
         raise HTTPException(status_code=400, detail="No URLs provided")
