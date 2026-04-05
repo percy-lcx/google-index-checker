@@ -5,7 +5,7 @@ from typing import Optional
 
 from gsc_auth import get_searchconsole_service
 from database import get_db
-from config import GSC_PROPERTY_URL, API_DELAY_MS
+from config import GSC_PROPERTY_URL, API_DELAY_MS, CONCURRENCY_LIMIT
 
 logger = logging.getLogger(__name__)
 
@@ -51,15 +51,109 @@ async def get_previous_verdict(db, url_id: int) -> Optional[str]:
     return row[0] if row else None
 
 
+async def _create_service_pool(loop, count: int) -> asyncio.Queue:
+    """Create a pool of GSC service instances for thread-safe concurrent use."""
+    pool: asyncio.Queue = asyncio.Queue()
+    for _ in range(count):
+        svc = await loop.run_in_executor(None, get_searchconsole_service)
+        pool.put_nowait(svc)
+    return pool
+
+
+async def _process_single_url(
+    loop,
+    db,
+    service_pool: asyncio.Queue,
+    check_id: int,
+    url: str,
+    progress: dict,
+):
+    """Process a single URL: inspect via API and store result."""
+    service = await service_pool.get()
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Upsert URL record
+        await db.execute(
+            "INSERT OR IGNORE INTO urls (url, first_seen) VALUES (?, ?)",
+            (url, now),
+        )
+        cursor = await db.execute("SELECT id, deindex_count FROM urls WHERE url = ?", (url,))
+        url_row = await cursor.fetchone()
+        url_id = url_row[0]
+
+        # Get previous verdict for transition detection
+        prev_verdict = await get_previous_verdict(db, url_id)
+
+        try:
+            response = await loop.run_in_executor(None, inspect_url, service, url, GSC_PROPERTY_URL)
+            parsed = parse_inspection_result(response)
+
+            # Transition detection
+            status_changed = False
+            current_verdict = parsed["verdict"]
+            if prev_verdict is not None and current_verdict is not None:
+                was_indexed = prev_verdict == "PASS"
+                is_indexed = current_verdict == "PASS"
+                if was_indexed != is_indexed:
+                    status_changed = True
+                    # Indexed -> Deindexed transition
+                    if was_indexed and not is_indexed:
+                        await db.execute(
+                            "UPDATE urls SET deindex_count = deindex_count + 1 WHERE id = ?",
+                            (url_id,),
+                        )
+
+            await db.execute(
+                """INSERT INTO results
+                   (check_id, url_id, coverage_state, verdict, last_crawl_time,
+                    crawled_as, google_canonical, user_canonical, referring_sitemaps,
+                    status_changed, error)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
+                (
+                    check_id,
+                    url_id,
+                    parsed["coverage_state"],
+                    parsed["verdict"],
+                    parsed["last_crawl_time"],
+                    parsed["crawled_as"],
+                    parsed["google_canonical"],
+                    parsed["user_canonical"],
+                    parsed["referring_sitemaps"],
+                    status_changed,
+                ),
+            )
+
+        except Exception as e:
+            logger.error(f"Inspection failed for {url}: {e}")
+            await db.execute(
+                """INSERT INTO results
+                   (check_id, url_id, coverage_state, verdict, last_crawl_time,
+                    crawled_as, google_canonical, user_canonical, referring_sitemaps,
+                    status_changed, error)
+                   VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, ?)""",
+                (check_id, url_id, str(e)),
+            )
+
+        progress["completed"] += 1
+
+        # Per-worker rate limiting delay
+        await asyncio.sleep(API_DELAY_MS / 1000.0)
+
+    finally:
+        await service_pool.put(service)
+
+
 async def run_inspection(check_id: int, urls: list[str]):
-    """Run inspection for all URLs in background."""
+    """Run inspection for all URLs concurrently with a service pool."""
     loop = asyncio.get_event_loop()
-    progress_store[check_id] = {"completed": 0, "total": len(urls), "status": "running"}
+    progress = {"completed": 0, "total": len(urls), "status": "running"}
+    progress_store[check_id] = progress
 
     try:
-        service = await loop.run_in_executor(None, get_searchconsole_service)
+        service_pool = await _create_service_pool(loop, CONCURRENCY_LIMIT)
     except Exception as e:
-        logger.error(f"Failed to initialize GSC service: {e}")
+        logger.error(f"Failed to initialize GSC service pool: {e}")
         progress_store[check_id]["status"] = "error"
         db = await get_db()
         try:
@@ -71,77 +165,14 @@ async def run_inspection(check_id: int, urls: list[str]):
 
     db = await get_db()
     try:
-        for url in urls:
-            now = datetime.now(timezone.utc).isoformat()
+        tasks = [
+            _process_single_url(loop, db, service_pool, check_id, url, progress)
+            for url in urls
+        ]
+        await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Upsert URL record
-            await db.execute(
-                "INSERT OR IGNORE INTO urls (url, first_seen) VALUES (?, ?)",
-                (url, now),
-            )
-            cursor = await db.execute("SELECT id, deindex_count FROM urls WHERE url = ?", (url,))
-            url_row = await cursor.fetchone()
-            url_id = url_row[0]
-            deindex_count = url_row[1]
-
-            # Get previous verdict for transition detection
-            prev_verdict = await get_previous_verdict(db, url_id)
-
-            try:
-                response = await loop.run_in_executor(None, inspect_url, service, url, GSC_PROPERTY_URL)
-                parsed = parse_inspection_result(response)
-
-                # Transition detection
-                status_changed = False
-                current_verdict = parsed["verdict"]
-                if prev_verdict is not None and current_verdict is not None:
-                    was_indexed = prev_verdict == "PASS"
-                    is_indexed = current_verdict == "PASS"
-                    if was_indexed != is_indexed:
-                        status_changed = True
-                        # Indexed -> Deindexed transition
-                        if was_indexed and not is_indexed:
-                            await db.execute(
-                                "UPDATE urls SET deindex_count = deindex_count + 1 WHERE id = ?",
-                                (url_id,),
-                            )
-
-                await db.execute(
-                    """INSERT INTO results
-                       (check_id, url_id, coverage_state, verdict, last_crawl_time,
-                        crawled_as, google_canonical, user_canonical, referring_sitemaps,
-                        status_changed, error)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
-                    (
-                        check_id,
-                        url_id,
-                        parsed["coverage_state"],
-                        parsed["verdict"],
-                        parsed["last_crawl_time"],
-                        parsed["crawled_as"],
-                        parsed["google_canonical"],
-                        parsed["user_canonical"],
-                        parsed["referring_sitemaps"],
-                        status_changed,
-                    ),
-                )
-
-            except Exception as e:
-                logger.error(f"Inspection failed for {url}: {e}")
-                await db.execute(
-                    """INSERT INTO results
-                       (check_id, url_id, coverage_state, verdict, last_crawl_time,
-                        crawled_as, google_canonical, user_canonical, referring_sitemaps,
-                        status_changed, error)
-                       VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, ?)""",
-                    (check_id, url_id, str(e)),
-                )
-
-            await db.commit()
-            progress_store[check_id]["completed"] += 1
-
-            # Rate limiting delay
-            await asyncio.sleep(API_DELAY_MS / 1000.0)
+        # Final commit for all pending writes
+        await db.commit()
 
         # Mark check as completed
         await db.execute("UPDATE checks SET status = 'completed' WHERE id = ?", (check_id,))
