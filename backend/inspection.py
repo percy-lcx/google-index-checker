@@ -3,9 +3,11 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
+from googleapiclient.errors import HttpError
+
 from gsc_auth import get_searchconsole_service
-from database import get_db
-from config import GSC_PROPERTY_URL, API_DELAY_MS, CONCURRENCY_LIMIT
+from database import get_db, increment_quota_usage, force_quota_exhausted
+from config import GSC_PROPERTY_URL, API_DELAY_MS, CONCURRENCY_LIMIT, DAILY_QUOTA_LIMIT
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +69,7 @@ async def _process_single_url(
     check_id: int,
     url: str,
     progress: dict,
+    quota_exhausted: asyncio.Event,
 ):
     """Process a single URL: inspect via API and store result."""
     service = await service_pool.get()
@@ -81,6 +84,35 @@ async def _process_single_url(
         cursor = await db.execute("SELECT id, deindex_count FROM urls WHERE url = ?", (url,))
         url_row = await cursor.fetchone()
         url_id = url_row[0]
+
+        # Check if quota was exhausted by another worker
+        if quota_exhausted.is_set():
+            await db.execute(
+                """INSERT INTO results
+                   (check_id, url_id, coverage_state, verdict, last_crawl_time,
+                    crawled_as, google_canonical, user_canonical, referring_sitemaps,
+                    status_changed, error)
+                   VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, ?)""",
+                (check_id, url_id, "Quota exhausted"),
+            )
+            progress["completed"] += 1
+            return
+
+        # Reserve quota BEFORE the API call
+        current_used = await increment_quota_usage(db)
+        if current_used > DAILY_QUOTA_LIMIT:
+            logger.warning(f"Quota exhausted mid-batch at {current_used}/{DAILY_QUOTA_LIMIT}")
+            quota_exhausted.set()
+            await db.execute(
+                """INSERT INTO results
+                   (check_id, url_id, coverage_state, verdict, last_crawl_time,
+                    crawled_as, google_canonical, user_canonical, referring_sitemaps,
+                    status_changed, error)
+                   VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, ?)""",
+                (check_id, url_id, "Quota exhausted"),
+            )
+            progress["completed"] += 1
+            return
 
         # Get previous verdict for transition detection
         prev_verdict = await get_previous_verdict(db, url_id)
@@ -124,6 +156,30 @@ async def _process_single_url(
                 ),
             )
 
+        except HttpError as e:
+            if e.resp.status == 429:
+                logger.warning(f"Google API returned 429 for {url}. Quota exhausted on Google side.")
+                await force_quota_exhausted(db)
+                quota_exhausted.set()
+                await db.execute(
+                    """INSERT INTO results
+                       (check_id, url_id, coverage_state, verdict, last_crawl_time,
+                        crawled_as, google_canonical, user_canonical, referring_sitemaps,
+                        status_changed, error)
+                       VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, ?)""",
+                    (check_id, url_id, "Google quota exhausted (HTTP 429)"),
+                )
+            else:
+                logger.error(f"Inspection failed for {url}: {e}")
+                await db.execute(
+                    """INSERT INTO results
+                       (check_id, url_id, coverage_state, verdict, last_crawl_time,
+                        crawled_as, google_canonical, user_canonical, referring_sitemaps,
+                        status_changed, error)
+                       VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, ?)""",
+                    (check_id, url_id, str(e)),
+                )
+
         except Exception as e:
             logger.error(f"Inspection failed for {url}: {e}")
             await db.execute(
@@ -165,8 +221,9 @@ async def run_inspection(check_id: int, urls: list[str]):
 
     db = await get_db()
     try:
+        quota_exhausted = asyncio.Event()
         tasks = [
-            _process_single_url(loop, db, service_pool, check_id, url, progress)
+            _process_single_url(loop, db, service_pool, check_id, url, progress, quota_exhausted)
             for url in urls
         ]
         await asyncio.gather(*tasks, return_exceptions=True)
