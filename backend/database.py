@@ -1,7 +1,16 @@
 import aiosqlite
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from config import DATABASE_PATH, DAILY_QUOTA_LIMIT, RETENTION_DAYS
+
+# Google's daily API quotas reset at midnight Pacific Time
+PACIFIC = ZoneInfo("America/Los_Angeles")
+
+
+def today_pacific() -> str:
+    """Return today's date in Pacific Time (matches Google's quota reset)."""
+    return datetime.now(PACIFIC).strftime("%Y-%m-%d")
 
 DB_PATH = DATABASE_PATH
 
@@ -77,7 +86,7 @@ async def run_retention_cleanup():
 
 async def get_daily_quota_used() -> int:
     """Read today's quota usage from the quota_usage table."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = today_pacific()
     db = await get_db()
     try:
         cursor = await db.execute("SELECT used FROM quota_usage WHERE date = ?", (today,))
@@ -89,7 +98,7 @@ async def get_daily_quota_used() -> int:
 
 async def increment_quota_usage(db: aiosqlite.Connection, count: int = 1) -> int:
     """Atomically increment today's quota counter. Returns new total."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = today_pacific()
     await db.execute(
         "INSERT INTO quota_usage (date, used) VALUES (?, ?) "
         "ON CONFLICT(date) DO UPDATE SET used = used + ?",
@@ -103,7 +112,7 @@ async def increment_quota_usage(db: aiosqlite.Connection, count: int = 1) -> int
 
 async def force_quota_exhausted(db: aiosqlite.Connection):
     """Mark today's quota as fully exhausted (e.g. after a Google 429)."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = today_pacific()
     await db.execute(
         "INSERT INTO quota_usage (date, used) VALUES (?, ?) "
         "ON CONFLICT(date) DO UPDATE SET used = ?",
@@ -114,8 +123,10 @@ async def force_quota_exhausted(db: aiosqlite.Connection):
 
 async def seed_quota_from_results():
     """One-time migration: if quota_usage has no row for today, seed it from existing results."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    today = today_pacific()
+    # Midnight Pacific in UTC for querying checks.created_at (stored as UTC)
+    pacific_midnight = datetime.now(PACIFIC).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = pacific_midnight.astimezone(timezone.utc).isoformat()
     db = await get_db()
     try:
         cursor = await db.execute("SELECT used FROM quota_usage WHERE date = ?", (today,))
