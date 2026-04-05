@@ -92,6 +92,21 @@ body {
 .summary-card .value.orange { color: #d97706; }
 .summary-card .value.gray { color: #6b7280; }
 
+.summary-card.clickable {
+  cursor: pointer;
+  transition: box-shadow 0.15s, border-color 0.15s;
+  border: 2px solid transparent;
+}
+
+.summary-card.clickable:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+
+.summary-card.clickable.active {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 1px #2563eb;
+}
+
 /* Forms */
 .card {
   background: white;
