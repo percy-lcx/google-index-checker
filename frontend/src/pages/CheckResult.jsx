@@ -17,11 +17,41 @@ export default function CheckResult() {
   const [loading, setLoading] = useState(true);
 
   // Filters
+  const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [changedOnly, setChangedOnly] = useState(false);
   const [sortField, setSortField] = useState(null);
   const [sortDir, setSortDir] = useState("asc");
+
+  // Debounce search input
+  useEffect(() => {
+    const timer = setTimeout(() => setSearch(searchInput), 300);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
+
+  const handleCardClick = (filter) => {
+    if (filter === "changed") {
+      if (changedOnly) {
+        setChangedOnly(false);
+      } else {
+        setChangedOnly(true);
+        setStatusFilter("all");
+      }
+    } else {
+      setChangedOnly(false);
+      if (statusFilter === filter) {
+        setStatusFilter("all");
+      } else {
+        setStatusFilter(filter);
+      }
+    }
+  };
+
+  const isCardActive = (filter) => {
+    if (filter === "changed") return changedOnly;
+    return statusFilter === filter && !changedOnly;
+  };
 
   const fetchCheck = useCallback(async () => {
     try {
@@ -120,23 +150,23 @@ export default function CheckResult() {
           <div className="label">Total</div>
           <div className="value">{total}</div>
         </div>
-        <div className="summary-card">
+        <div className={`summary-card clickable${isCardActive("indexed") ? " active" : ""}`} onClick={() => handleCardClick("indexed")}>
           <div className="label">Indexed</div>
           <div className="value green">
             {indexed} {total > 0 && <small>({((indexed / total) * 100).toFixed(1)}%)</small>}
           </div>
         </div>
-        <div className="summary-card">
+        <div className={`summary-card clickable${isCardActive("not_indexed") ? " active" : ""}`} onClick={() => handleCardClick("not_indexed")}>
           <div className="label">Not Indexed</div>
           <div className="value red">
             {notIndexed} {total > 0 && <small>({((notIndexed / total) * 100).toFixed(1)}%)</small>}
           </div>
         </div>
-        <div className="summary-card">
+        <div className={`summary-card clickable${isCardActive("changed") ? " active" : ""}`} onClick={() => handleCardClick("changed")}>
           <div className="label">Status Changed</div>
           <div className="value orange">{changed}</div>
         </div>
-        <div className="summary-card">
+        <div className={`summary-card clickable${isCardActive("error") ? " active" : ""}`} onClick={() => handleCardClick("error")}>
           <div className="label">Errors</div>
           <div className="value gray">{errors}</div>
         </div>
@@ -154,8 +184,8 @@ export default function CheckResult() {
           <input
             type="text"
             placeholder="Search URLs..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
           />
           <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
             <option value="all">All statuses</option>
