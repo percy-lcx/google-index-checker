@@ -9,9 +9,12 @@ import {
   ResponsiveContainer,
 } from "recharts";
 
-function formatDate(iso) {
+function formatDate(iso, includeTime) {
   const d = new Date(iso);
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const date = d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  if (!includeTime) return date;
+  const time = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return `${date} ${time}`;
 }
 
 function CustomTooltip({ active, payload, label }) {
@@ -38,10 +41,14 @@ export default function TrendChart({ checks }) {
 
   if (completed.length < 2) return null;
 
+  // Check if any dates collide — if so, include time to disambiguate
+  const dateOnly = completed.map((c) => new Date(c.created_at).toDateString());
+  const hasDuplicateDates = new Set(dateOnly).size < dateOnly.length;
+
   const data = completed.map((c) => {
     const total = c.url_count || 1;
     return {
-      date: formatDate(c.created_at),
+      date: formatDate(c.created_at, hasDuplicateDates),
       indexed_pct: (c.indexed_count / total) * 100,
       not_indexed_pct: (c.not_indexed_count / total) * 100,
       error_pct: (c.error_count / total) * 100,
