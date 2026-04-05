@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { listChecks } from "../api/client";
+import TrendChart from "../components/TrendChart";
 
 export default function CheckHistory() {
   const [checks, setChecks] = useState([]);
@@ -17,7 +18,9 @@ export default function CheckHistory() {
   if (loading) return <div className="card">Loading...</div>;
 
   return (
-    <div className="card">
+    <div>
+      <TrendChart checks={checks} />
+      <div className="card">
       <h2>Check History</h2>
       {checks.length === 0 ? (
         <p style={{ color: "#999", marginTop: 12 }}>No checks yet.</p>
@@ -43,6 +46,7 @@ export default function CheckHistory() {
           ))}
         </ul>
       )}
+      </div>
     </div>
   );
 }
