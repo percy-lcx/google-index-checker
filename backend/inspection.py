@@ -7,12 +7,29 @@ from googleapiclient.errors import HttpError
 
 from gsc_auth import get_searchconsole_service
 from database import get_db, increment_quota_usage, force_quota_exhausted
-from config import GSC_PROPERTY_URL, API_DELAY_MS, CONCURRENCY_LIMIT, DAILY_QUOTA_LIMIT
+from config import GSC_PROPERTY_URL, CONCURRENCY_LIMIT, MAX_REQUESTS_PER_MINUTE, DAILY_QUOTA_LIMIT
 
 logger = logging.getLogger(__name__)
 
 # Global progress tracking: check_id -> {completed, total, status}
 progress_store: dict[int, dict] = {}
+
+
+class RateLimiter:
+    """Async rate limiter that enforces a maximum requests-per-second rate."""
+
+    def __init__(self, max_per_second: float):
+        self._interval = 1.0 / max_per_second
+        self._lock = asyncio.Lock()
+        self._last = 0.0
+
+    async def acquire(self):
+        async with self._lock:
+            now = asyncio.get_event_loop().time()
+            wait = self._last + self._interval - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last = asyncio.get_event_loop().time()
 
 
 def inspect_url(service, url: str, property_url: str) -> dict:
@@ -66,6 +83,7 @@ async def _process_single_url(
     loop,
     db,
     service_pool: asyncio.Queue,
+    rate_limiter: RateLimiter,
     check_id: int,
     url: str,
     progress: dict,
@@ -118,6 +136,8 @@ async def _process_single_url(
         prev_verdict = await get_previous_verdict(db, url_id)
 
         try:
+            # Rate limit before API call
+            await rate_limiter.acquire()
             response = await loop.run_in_executor(None, inspect_url, service, url, GSC_PROPERTY_URL)
             parsed = parse_inspection_result(response)
 
@@ -193,9 +213,6 @@ async def _process_single_url(
 
         progress["completed"] += 1
 
-        # Per-worker rate limiting delay
-        await asyncio.sleep(API_DELAY_MS / 1000.0)
-
     finally:
         await service_pool.put(service)
 
@@ -219,11 +236,13 @@ async def run_inspection(check_id: int, urls: list[str]):
             await db.close()
         return
 
+    rate_limiter = RateLimiter(MAX_REQUESTS_PER_MINUTE / 60.0)
+
     db = await get_db()
     try:
         quota_exhausted = asyncio.Event()
         tasks = [
-            _process_single_url(loop, db, service_pool, check_id, url, progress, quota_exhausted)
+            _process_single_url(loop, db, service_pool, rate_limiter, check_id, url, progress, quota_exhausted)
             for url in urls
         ]
         await asyncio.gather(*tasks, return_exceptions=True)
