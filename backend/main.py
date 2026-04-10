@@ -13,8 +13,9 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from config import GSC_PROPERTY_URL, DAILY_QUOTA_LIMIT
-from database import init_db, get_db, get_daily_quota_used, run_retention_cleanup
+from database import init_db, get_db, get_daily_quota_used, run_retention_cleanup, get_all_profiles_quota
 from inspection import run_inspection, progress_store
+from profiles import load_profiles_from_json, get_all_profiles, preview_url_profiles
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     await init_db()
+    await load_profiles_from_json()
     await run_retention_cleanup()
     logger.info("Database initialized and retention cleanup complete.")
 
@@ -40,6 +42,18 @@ async def startup():
 # --- Models ---
 
 class CheckRequest(BaseModel):
+    urls: list[str]
+
+
+class ProfileRequest(BaseModel):
+    name: str
+    path_pattern: str
+    credentials_path: str
+    token_path: str
+    sort_order: int = 0
+
+
+class PreviewRequest(BaseModel):
     urls: list[str]
 
 
@@ -67,7 +81,89 @@ def clean_url_list(raw_urls: list[str]) -> list[str]:
     return cleaned
 
 
-# --- Endpoints ---
+# --- Profile Endpoints ---
+
+@app.get("/api/profiles")
+async def list_profiles():
+    """List all credential profiles."""
+    db = await get_db()
+    try:
+        profiles = await get_all_profiles(db)
+        return profiles
+    finally:
+        await db.close()
+
+
+@app.post("/api/profiles")
+async def create_profile(request: ProfileRequest):
+    """Create a new credential profile."""
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            """INSERT INTO profiles (name, path_pattern, credentials_path, token_path, sort_order)
+               VALUES (?, ?, ?, ?, ?)""",
+            (request.name, request.path_pattern, request.credentials_path, request.token_path, request.sort_order),
+        )
+        profile_id = cursor.lastrowid
+        await db.commit()
+        return {"id": profile_id, **request.model_dump()}
+    except Exception as e:
+        if "UNIQUE constraint" in str(e):
+            raise HTTPException(status_code=409, detail=f"Profile name '{request.name}' already exists")
+        raise
+    finally:
+        await db.close()
+
+
+@app.put("/api/profiles/{profile_id}")
+async def update_profile(profile_id: int, request: ProfileRequest):
+    """Update an existing credential profile."""
+    db = await get_db()
+    try:
+        cursor = await db.execute("SELECT id FROM profiles WHERE id = ?", (profile_id,))
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Profile not found")
+
+        await db.execute(
+            """UPDATE profiles SET name = ?, path_pattern = ?, credentials_path = ?,
+               token_path = ?, sort_order = ? WHERE id = ?""",
+            (request.name, request.path_pattern, request.credentials_path, request.token_path, request.sort_order, profile_id),
+        )
+        await db.commit()
+        return {"id": profile_id, **request.model_dump()}
+    finally:
+        await db.close()
+
+
+@app.delete("/api/profiles/{profile_id}")
+async def delete_profile(profile_id: int):
+    """Delete a credential profile."""
+    db = await get_db()
+    try:
+        cursor = await db.execute("SELECT id FROM profiles WHERE id = ?", (profile_id,))
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Profile not found")
+
+        await db.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+        await db.commit()
+        return {"deleted": True}
+    finally:
+        await db.close()
+
+
+@app.post("/api/profiles/preview")
+async def preview_profiles(request: PreviewRequest):
+    """Preview which profile each URL maps to."""
+    cleaned = clean_url_list(request.urls)
+    db = await get_db()
+    try:
+        profiles = await get_all_profiles(db)
+        return preview_url_profiles(cleaned, profiles)
+    finally:
+        await db.close()
+
+
+# --- Check Endpoints ---
 
 @app.post("/api/checks")
 async def create_check(request: CheckRequest):
@@ -81,7 +177,7 @@ async def create_check(request: CheckRequest):
     if not cleaned:
         raise HTTPException(status_code=400, detail="No valid URLs after validation")
 
-    # Quota check
+    # Quota check (aggregate across all profiles)
     used = await get_daily_quota_used()
     remaining = DAILY_QUOTA_LIMIT - used
     if len(cleaned) > remaining:
@@ -193,9 +289,11 @@ async def get_check(check_id: int):
         cursor = await db.execute(
             """SELECT r.id, u.url, r.coverage_state, r.verdict, r.last_crawl_time,
                       r.crawled_as, r.google_canonical, r.user_canonical,
-                      r.referring_sitemaps, r.status_changed, r.error, u.deindex_count
+                      r.referring_sitemaps, r.status_changed, r.error, u.deindex_count,
+                      r.profile_id, p.name as profile_name
                FROM results r
                JOIN urls u ON r.url_id = u.id
+               LEFT JOIN profiles p ON r.profile_id = p.id
                WHERE r.check_id = ?
                ORDER BY r.id""",
             (check_id,),
@@ -222,6 +320,8 @@ async def get_check(check_id: int):
                     "status_changed": bool(r[9]),
                     "error": r[10],
                     "deindex_count": r[11],
+                    "profile_id": r[12],
+                    "profile_name": r[13],
                 }
                 for r in results
             ],
@@ -276,9 +376,11 @@ async def export_check(check_id: int):
         cursor = await db.execute(
             """SELECT u.url, r.coverage_state, r.verdict, r.last_crawl_time,
                       r.crawled_as, r.google_canonical, r.user_canonical,
-                      r.referring_sitemaps, r.status_changed, r.error, u.deindex_count
+                      r.referring_sitemaps, r.status_changed, r.error, u.deindex_count,
+                      p.name as profile_name
                FROM results r
                JOIN urls u ON r.url_id = u.id
+               LEFT JOIN profiles p ON r.profile_id = p.id
                WHERE r.check_id = ?
                ORDER BY r.id""",
             (check_id,),
@@ -292,10 +394,10 @@ async def export_check(check_id: int):
     writer.writerow([
         "URL", "Coverage State", "Verdict", "Last Crawl Time",
         "Crawled As", "Google Canonical", "User Canonical",
-        "Referring Sitemaps", "Status Changed", "Error", "Deindex Count",
+        "Referring Sitemaps", "Status Changed", "Error", "Deindex Count", "Profile",
     ])
     for r in results:
-        writer.writerow([r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], bool(r[8]), r[9], r[10]])
+        writer.writerow([r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], bool(r[8]), r[9], r[10], r[11] or ""])
 
     output.seek(0)
     ts = datetime.fromisoformat(check[0]).strftime("%Y-%m-%d_%H%M")
@@ -372,10 +474,30 @@ async def url_lookup(url: str):
 
 @app.get("/api/quota")
 async def get_quota():
-    """Return remaining daily quota."""
+    """Return remaining daily quota, with per-profile breakdown if profiles exist."""
     used = await get_daily_quota_used()
-    return {
+    profiles_quota = await get_all_profiles_quota()
+
+    result = {
         "used": used,
         "limit": DAILY_QUOTA_LIMIT,
         "remaining": DAILY_QUOTA_LIMIT - used,
     }
+
+    if profiles_quota:
+        result["profiles"] = [
+            {
+                "profile_id": pq["profile_id"],
+                "name": pq["name"],
+                "used": pq["used"],
+                "limit": DAILY_QUOTA_LIMIT,
+                "remaining": DAILY_QUOTA_LIMIT - pq["used"],
+            }
+            for pq in profiles_quota
+        ]
+        # Total across all profiles
+        result["total_used"] = sum(pq["used"] for pq in profiles_quota)
+        result["total_limit"] = DAILY_QUOTA_LIMIT * len(profiles_quota)
+        result["total_remaining"] = result["total_limit"] - result["total_used"]
+
+    return result

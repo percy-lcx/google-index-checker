@@ -21,6 +21,7 @@ export default function CheckResult() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [changedOnly, setChangedOnly] = useState(false);
+  const [profileFilter, setProfileFilter] = useState("all");
   const [sortField, setSortField] = useState(null);
   const [sortDir, setSortDir] = useState("asc");
 
@@ -88,6 +89,8 @@ export default function CheckResult() {
 
   const isRunning = check.status === "running";
   const results = check.results || [];
+  const hasProfiles = results.some((r) => r.profile_name);
+  const profileNames = [...new Set(results.map((r) => r.profile_name).filter(Boolean))];
 
   // Summary
   const indexed = results.filter((r) => r.verdict === "PASS").length;
@@ -103,6 +106,7 @@ export default function CheckResult() {
     if (statusFilter === "not_indexed" && (r.verdict === "PASS" || r.error)) return false;
     if (statusFilter === "error" && !r.error) return false;
     if (changedOnly && !r.status_changed) return false;
+    if (profileFilter !== "all" && (r.profile_name || "No profile") !== profileFilter) return false;
     return true;
   });
 
@@ -193,6 +197,17 @@ export default function CheckResult() {
             <option value="not_indexed">Not Indexed</option>
             <option value="error">Errors</option>
           </select>
+          {hasProfiles && (
+            <select value={profileFilter} onChange={(e) => setProfileFilter(e.target.value)}>
+              <option value="all">All profiles</option>
+              {profileNames.map((name) => (
+                <option key={name} value={name}>{name}</option>
+              ))}
+              {results.some((r) => !r.profile_name) && (
+                <option value="No profile">No profile</option>
+              )}
+            </select>
+          )}
           <label>
             <input
               type="checkbox"
@@ -212,14 +227,17 @@ export default function CheckResult() {
           <table className="results-table">
             <thead>
               <tr>
-                <th style={{ width: "35%" }} onClick={() => handleSort("url")}>URL{sortArrow("url")}</th>
+                <th style={{ width: hasProfiles ? "28%" : "35%" }} onClick={() => handleSort("url")}>URL{sortArrow("url")}</th>
                 <th style={{ width: "8%" }} onClick={() => handleSort("verdict")}>Status{sortArrow("verdict")}</th>
+                {hasProfiles && (
+                  <th style={{ width: "8%" }} onClick={() => handleSort("profile_name")}>Profile{sortArrow("profile_name")}</th>
+                )}
                 <th style={{ width: "12%" }} onClick={() => handleSort("coverage_state")}>Coverage{sortArrow("coverage_state")}</th>
                 <th style={{ width: "10%" }} onClick={() => handleSort("last_crawl_time")}>Last Crawl{sortArrow("last_crawl_time")}</th>
                 <th style={{ width: "8%" }} onClick={() => handleSort("crawled_as")}>Agent{sortArrow("crawled_as")}</th>
                 <th style={{ width: "9%" }} onClick={() => handleSort("deindex_count")}>Deindex #{sortArrow("deindex_count")}</th>
                 <th style={{ width: "9%" }}>Canonical</th>
-                <th style={{ width: "9%" }}>Changed</th>
+                <th style={{ width: "8%" }}>Changed</th>
               </tr>
             </thead>
             <tbody>
@@ -236,6 +254,9 @@ export default function CheckResult() {
                     <td>
                       <VerdictBadge verdict={r.verdict} error={r.error} />
                     </td>
+                    {hasProfiles && (
+                      <td>{r.profile_name || "—"}</td>
+                    )}
                     <td>{r.coverage_state || "—"}</td>
                     <td>
                       {r.last_crawl_time
@@ -265,7 +286,7 @@ export default function CheckResult() {
               })}
               {filtered.length === 0 && (
                 <tr>
-                  <td colSpan={8} style={{ textAlign: "center", color: "#999" }}>
+                  <td colSpan={hasProfiles ? 9 : 8} style={{ textAlign: "center", color: "#999" }}>
                     No results match filters.
                   </td>
                 </tr>

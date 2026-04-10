@@ -1,0 +1,23 @@
+[
+  {
+    "name": "English",
+    "path_pattern": "/en/*",
+    "credentials_path": "./credentials-en.json",
+    "token_path": "./token-en.json",
+    "sort_order": 1
+  },
+  {
+    "name": "India English",
+    "path_pattern": "/en-in/*",
+    "credentials_path": "./credentials-en-in.json",
+    "token_path": "./token-en-in.json",
+    "sort_order": 0
+  },
+  {
+    "name": "Thai",
+    "path_pattern": "/th/*",
+    "credentials_path": "./credentials-th.json",
+    "token_path": "./token-th.json",
+    "sort_order": 2
+  }
+]
