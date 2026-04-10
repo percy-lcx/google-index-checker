@@ -3,6 +3,15 @@ import { useNavigate } from "react-router-dom";
 import { listChecks } from "../api/client";
 import TrendChart from "../components/TrendChart";
 
+function formatElapsed(seconds) {
+  if (seconds == null) return null;
+  const s = Math.round(seconds);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return `${m}m ${rem}s`;
+}
+
 export default function CheckHistory() {
   const [checks, setChecks] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -32,6 +41,9 @@ export default function CheckHistory() {
                 <strong>{new Date(c.created_at).toLocaleString()}</strong>
                 <div className="check-meta">
                   <span>{c.url_count} URLs</span>
+                  {c.elapsed_seconds != null && (
+                    <span style={{ color: "#888" }}>{formatElapsed(c.elapsed_seconds)}</span>
+                  )}
                   <span className="badge badge-green">{c.indexed_count} indexed</span>
                   <span className="badge badge-red">{c.not_indexed_count} not indexed</span>
                   {c.error_count > 0 && (

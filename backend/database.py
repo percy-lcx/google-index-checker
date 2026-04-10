@@ -88,6 +88,13 @@ async def init_db():
             await db.execute("ALTER TABLE results ADD COLUMN profile_id INTEGER REFERENCES profiles(id)")
             await db.commit()
 
+        # Migration: add elapsed_seconds to checks if missing
+        cursor = await db.execute("PRAGMA table_info(checks)")
+        check_columns = [row[1] for row in await cursor.fetchall()]
+        if "elapsed_seconds" not in check_columns:
+            await db.execute("ALTER TABLE checks ADD COLUMN elapsed_seconds REAL")
+            await db.commit()
+
         await db.commit()
     finally:
         await db.close()
