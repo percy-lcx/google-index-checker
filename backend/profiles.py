@@ -2,6 +2,7 @@ import json
 import logging
 import os
 from fnmatch import fnmatch
+from typing import Optional
 from urllib.parse import urlparse
 
 import aiosqlite
@@ -60,7 +61,7 @@ async def get_all_profiles(db: aiosqlite.Connection) -> list[dict]:
     ]
 
 
-def match_url_to_profile(url: str, profiles: list[dict]) -> dict | None:
+def match_url_to_profile(url: str, profiles: list[dict]) -> Optional[dict]:
     """Match a URL to a profile by path pattern.
 
     Profiles are checked in sort_order. The user must set sort_order
