@@ -2,6 +2,15 @@ import { useState, useEffect, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { getCheck, subscribeProgress, getExportUrl } from "../api/client";
 
+function formatElapsed(seconds) {
+  if (seconds == null) return null;
+  const s = Math.round(seconds);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return `${m}m ${rem}s`;
+}
+
 function VerdictBadge({ verdict, error }) {
   if (error) return <span className="badge badge-gray">Error</span>;
   if (verdict === "PASS") return <span className="badge badge-green">Indexed</span>;
@@ -138,6 +147,11 @@ export default function CheckResult() {
         <div className="card">
           <div className="progress-text">
             Inspecting: {progress.completed}/{progress.total} URLs
+            {progress.elapsed_seconds != null && (
+              <span style={{ marginLeft: 16, color: "#888" }}>
+                {formatElapsed(progress.elapsed_seconds)}
+              </span>
+            )}
           </div>
           <div className="progress-bar-container">
             <div
@@ -178,6 +192,11 @@ export default function CheckResult() {
           <div className="label">Checked</div>
           <div className="value" style={{ fontSize: 14 }}>
             {new Date(check.created_at).toLocaleString()}
+            {check.elapsed_seconds != null && (
+              <div style={{ color: "#888", marginTop: 2 }}>
+                {formatElapsed(check.elapsed_seconds)}
+              </div>
+            )}
           </div>
         </div>
       </div>

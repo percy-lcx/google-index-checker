@@ -2,6 +2,7 @@ import asyncio
 import csv
 import io
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse
@@ -249,7 +250,7 @@ async def list_checks():
     db = await get_db()
     try:
         cursor = await db.execute(
-            """SELECT c.id, c.created_at, c.url_count, c.property_url, c.status,
+            """SELECT c.id, c.created_at, c.url_count, c.property_url, c.status, c.elapsed_seconds,
                       COALESCE(SUM(CASE WHEN r.verdict = 'PASS' THEN 1 ELSE 0 END), 0) as indexed_count,
                       COALESCE(SUM(CASE WHEN r.verdict IS NOT NULL AND r.verdict != 'PASS' AND r.error IS NULL THEN 1 ELSE 0 END), 0) as not_indexed_count,
                       COALESCE(SUM(CASE WHEN r.error IS NOT NULL THEN 1 ELSE 0 END), 0) as error_count
@@ -266,9 +267,10 @@ async def list_checks():
                 "url_count": row[2],
                 "property_url": row[3],
                 "status": row[4],
-                "indexed_count": row[5],
-                "not_indexed_count": row[6],
-                "error_count": row[7],
+                "elapsed_seconds": row[5],
+                "indexed_count": row[6],
+                "not_indexed_count": row[7],
+                "error_count": row[8],
             }
             for row in rows
         ]
@@ -306,6 +308,7 @@ async def get_check(check_id: int):
             "url_count": check[2],
             "property_url": check[3],
             "status": check[4],
+            "elapsed_seconds": check[5],
             "results": [
                 {
                     "id": r[0],
@@ -338,9 +341,14 @@ async def check_progress(check_id: int):
         while True:
             progress = progress_store.get(check_id)
             if progress:
+                if progress["status"] in ("completed", "error"):
+                    elapsed = progress.get("elapsed_seconds", 0.0)
+                else:
+                    started_at = progress.get("started_at")
+                    elapsed = round(time.monotonic() - started_at, 1) if started_at else 0.0
                 yield {
                     "event": "progress",
-                    "data": f'{{"completed": {progress["completed"]}, "total": {progress["total"]}, "status": "{progress["status"]}"}}',
+                    "data": f'{{"completed": {progress["completed"]}, "total": {progress["total"]}, "status": "{progress["status"]}", "elapsed_seconds": {elapsed}}}',
                 }
                 if progress["status"] in ("completed", "error"):
                     break
