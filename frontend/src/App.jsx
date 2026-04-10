@@ -3,6 +3,7 @@ import NewCheck from "./pages/NewCheck";
 import CheckResult from "./pages/CheckResult";
 import CheckHistory from "./pages/CheckHistory";
 import UrlDetail from "./pages/UrlDetail";
+import Profiles from "./pages/Profiles";
 import "./App.css";
 
 function App() {
@@ -14,6 +15,7 @@ function App() {
           <nav>
             <Link to="/">Check URLs</Link>
             <Link to="/history">History</Link>
+            <Link to="/profiles">Profiles</Link>
           </nav>
         </header>
         <main className="app-main">
@@ -22,6 +24,7 @@ function App() {
             <Route path="/checks/:id" element={<CheckResult />} />
             <Route path="/history" element={<CheckHistory />} />
             <Route path="/urls/:urlString" element={<UrlDetail />} />
+            <Route path="/profiles" element={<Profiles />} />
           </Routes>
         </main>
       </div>

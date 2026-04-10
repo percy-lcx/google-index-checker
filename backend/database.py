@@ -64,7 +64,30 @@ async def init_db():
                 date TEXT PRIMARY KEY,
                 used INTEGER NOT NULL DEFAULT 0
             );
+
+            CREATE TABLE IF NOT EXISTS profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                path_pattern TEXT NOT NULL,
+                credentials_path TEXT NOT NULL,
+                token_path TEXT NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS profile_quota_usage (
+                date TEXT NOT NULL,
+                profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                used INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (date, profile_id)
+            );
         """)
+        # Migration: add profile_id to results if missing
+        cursor = await db.execute("PRAGMA table_info(results)")
+        columns = [row[1] for row in await cursor.fetchall()]
+        if "profile_id" not in columns:
+            await db.execute("ALTER TABLE results ADD COLUMN profile_id INTEGER REFERENCES profiles(id)")
+            await db.commit()
+
         await db.commit()
     finally:
         await db.close()
@@ -119,6 +142,67 @@ async def force_quota_exhausted(db: aiosqlite.Connection):
         (today, DAILY_QUOTA_LIMIT, DAILY_QUOTA_LIMIT),
     )
     await db.commit()
+
+
+async def get_profile_quota_used(profile_id: int) -> int:
+    """Read today's quota usage for a specific profile."""
+    today = today_pacific()
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT used FROM profile_quota_usage WHERE date = ? AND profile_id = ?",
+            (today, profile_id),
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+    finally:
+        await db.close()
+
+
+async def increment_profile_quota_usage(db: aiosqlite.Connection, profile_id: int, count: int = 1) -> int:
+    """Atomically increment today's quota counter for a profile. Returns new total."""
+    today = today_pacific()
+    await db.execute(
+        "INSERT INTO profile_quota_usage (date, profile_id, used) VALUES (?, ?, ?) "
+        "ON CONFLICT(date, profile_id) DO UPDATE SET used = used + ?",
+        (today, profile_id, count, count),
+    )
+    await db.commit()
+    cursor = await db.execute(
+        "SELECT used FROM profile_quota_usage WHERE date = ? AND profile_id = ?",
+        (today, profile_id),
+    )
+    row = await cursor.fetchone()
+    return row[0]
+
+
+async def force_profile_quota_exhausted(db: aiosqlite.Connection, profile_id: int):
+    """Mark today's quota as fully exhausted for a profile."""
+    today = today_pacific()
+    await db.execute(
+        "INSERT INTO profile_quota_usage (date, profile_id, used) VALUES (?, ?, ?) "
+        "ON CONFLICT(date, profile_id) DO UPDATE SET used = ?",
+        (today, profile_id, DAILY_QUOTA_LIMIT, DAILY_QUOTA_LIMIT),
+    )
+    await db.commit()
+
+
+async def get_all_profiles_quota() -> list[dict]:
+    """Get today's quota usage for all profiles."""
+    today = today_pacific()
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            """SELECT p.id, p.name, COALESCE(pq.used, 0) as used
+               FROM profiles p
+               LEFT JOIN profile_quota_usage pq ON p.id = pq.profile_id AND pq.date = ?
+               ORDER BY p.sort_order""",
+            (today,),
+        )
+        rows = await cursor.fetchall()
+        return [{"profile_id": row[0], "name": row[1], "used": row[2]} for row in rows]
+    finally:
+        await db.close()
 
 
 async def seed_quota_from_results():

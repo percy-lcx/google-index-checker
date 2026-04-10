@@ -60,3 +60,37 @@ export function subscribeProgress(checkId, onMessage) {
   es.onerror = () => es.close();
   return es;
 }
+
+// --- Profiles ---
+
+export async function getProfiles() {
+  return request("/api/profiles");
+}
+
+export async function createProfile(profile) {
+  return request("/api/profiles", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(profile),
+  });
+}
+
+export async function updateProfile(id, profile) {
+  return request(`/api/profiles/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(profile),
+  });
+}
+
+export async function deleteProfile(id) {
+  return request(`/api/profiles/${id}`, { method: "DELETE" });
+}
+
+export async function previewProfiles(urls) {
+  return request("/api/profiles/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ urls }),
+  });
+}
