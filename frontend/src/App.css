@@ -409,6 +409,63 @@ textarea:focus {
   margin: 12px 0;
 }
 
+/* Schedule tooltip (Watchlist page) */
+.schedule-link-wrapper {
+  position: relative;
+  display: inline-block;
+}
+
+.schedule-link {
+  color: #3b82f6;
+  text-decoration: underline;
+  cursor: pointer;
+  user-select: none;
+}
+
+.schedule-link:hover {
+  color: #2563eb;
+}
+
+.schedule-link:focus {
+  outline: 2px solid #93c5fd;
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.schedule-tooltip {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 6px);
+  background: #1a1a2e;
+  color: white;
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  min-width: 160px;
+  max-width: 260px;
+  max-height: 320px;
+  overflow-y: auto;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+  z-index: 100;
+}
+
+.schedule-tooltip-header {
+  display: block;
+  font-weight: 600;
+  color: #cbd5e1;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 11px;
+  margin-bottom: 6px;
+}
+
+.schedule-tooltip-row {
+  display: block;
+  font-family: monospace;
+  font-size: 12px;
+}
+
 /* Trend chart */
 .trend-chart-card {
   margin-bottom: 24px;

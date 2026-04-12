@@ -39,6 +39,11 @@ export default function CheckHistory() {
             <li key={c.id} onClick={() => navigate(`/checks/${c.id}`)}>
               <div>
                 <strong>{new Date(c.created_at).toLocaleString()}</strong>
+                {c.source === "scheduled" && (
+                  <span className="badge badge-gray" style={{ marginLeft: 8 }}>
+                    scheduled
+                  </span>
+                )}
                 <div className="check-meta">
                   <span>{c.url_count} URLs</span>
                   {c.elapsed_seconds != null && (

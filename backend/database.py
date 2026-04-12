@@ -1,3 +1,5 @@
+import json
+
 import aiosqlite
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -80,7 +82,32 @@ async def init_db():
                 used INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (date, profile_id)
             );
+
+            CREATE TABLE IF NOT EXISTS watchlist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT UNIQUE NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_watchlist_sort ON watchlist(sort_order);
+
+            CREATE TABLE IF NOT EXISTS schedule_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                times TEXT NOT NULL,
+                timezone TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1
+            );
         """)
+
+        # Seed the singleton schedule_settings row on first init
+        cursor = await db.execute("SELECT 1 FROM schedule_settings WHERE id = 1")
+        if not await cursor.fetchone():
+            await db.execute(
+                "INSERT INTO schedule_settings (id, times, timezone, enabled) VALUES (1, ?, ?, 1)",
+                (json.dumps(["07:00", "17:00"]), "Asia/Hong_Kong"),
+            )
+            await db.commit()
         # Migration: add profile_id to results if missing
         cursor = await db.execute("PRAGMA table_info(results)")
         columns = [row[1] for row in await cursor.fetchall()]
@@ -95,6 +122,93 @@ async def init_db():
             await db.execute("ALTER TABLE checks ADD COLUMN elapsed_seconds REAL")
             await db.commit()
 
+        # Migration: add source to checks if missing
+        if "source" not in check_columns:
+            await db.execute("ALTER TABLE checks ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'")
+            await db.commit()
+
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_watchlist() -> list[str]:
+    """Return the watchlist URLs in saved order."""
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT url FROM watchlist ORDER BY sort_order, id"
+        )
+        rows = await cursor.fetchall()
+        return [row[0] for row in rows]
+    finally:
+        await db.close()
+
+
+async def replace_watchlist(urls: list[str]) -> int:
+    """Atomically replace the entire watchlist. Returns the new count."""
+    now = datetime.now(timezone.utc).isoformat()
+    db = await get_db()
+    try:
+        await db.execute("BEGIN")
+        await db.execute("DELETE FROM watchlist")
+        for i, url in enumerate(urls):
+            await db.execute(
+                "INSERT OR IGNORE INTO watchlist (url, sort_order, created_at) VALUES (?, ?, ?)",
+                (url, i, now),
+            )
+        await db.commit()
+        cursor = await db.execute("SELECT COUNT(*) FROM watchlist")
+        row = await cursor.fetchone()
+        return row[0]
+    finally:
+        await db.close()
+
+
+async def has_running_scheduled_check() -> bool:
+    """True if any scheduled check is still in the 'running' state."""
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT 1 FROM checks WHERE source = 'scheduled' AND status = 'running' LIMIT 1"
+        )
+        row = await cursor.fetchone()
+        return row is not None
+    finally:
+        await db.close()
+
+
+async def get_schedule_settings() -> dict:
+    """Return the singleton schedule row as a dict."""
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT times, timezone, enabled FROM schedule_settings WHERE id = 1"
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return {
+                "times": ["07:00", "17:00"],
+                "timezone": "Asia/Hong_Kong",
+                "enabled": True,
+            }
+        return {
+            "times": json.loads(row[0]),
+            "timezone": row[1],
+            "enabled": bool(row[2]),
+        }
+    finally:
+        await db.close()
+
+
+async def save_schedule_settings(times: list[str], timezone_name: str, enabled: bool) -> None:
+    """Replace the singleton schedule row. Caller has already validated inputs."""
+    db = await get_db()
+    try:
+        await db.execute(
+            "INSERT OR REPLACE INTO schedule_settings (id, times, timezone, enabled) VALUES (1, ?, ?, ?)",
+            (json.dumps(times), timezone_name, 1 if enabled else 0),
+        )
         await db.commit()
     finally:
         await db.close()

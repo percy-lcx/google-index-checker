@@ -94,3 +94,31 @@ export async function previewProfiles(urls) {
     body: JSON.stringify({ urls }),
   });
 }
+
+// --- Watchlist ---
+
+export async function getWatchlist() {
+  return request("/api/watchlist");
+}
+
+export async function saveWatchlist(urls) {
+  return request("/api/watchlist", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ urls }),
+  });
+}
+
+// --- Schedule ---
+
+export async function getSchedule() {
+  return request("/api/schedule");
+}
+
+export async function saveSchedule(settings) {
+  return request("/api/schedule", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(settings),
+  });
+}

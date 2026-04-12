@@ -7,3 +7,4 @@ python-dotenv==1.0.1
 aiosqlite==0.20.0
 python-multipart==0.0.20
 sse-starlette==2.2.1
+apscheduler==3.10.4

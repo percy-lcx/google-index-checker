@@ -2,26 +2,52 @@ import asyncio
 import csv
 import io
 import logging
+import re
 import time
-from datetime import datetime, timezone
-from typing import Optional
-from urllib.parse import urlparse
+from contextlib import asynccontextmanager
+from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-from config import GSC_PROPERTY_URL, DAILY_QUOTA_LIMIT
-from database import init_db, get_db, get_daily_quota_used, run_retention_cleanup, get_all_profiles_quota
-from inspection import run_inspection, progress_store
+from config import DAILY_QUOTA_LIMIT
+from database import (
+    init_db,
+    get_db,
+    get_daily_quota_used,
+    run_retention_cleanup,
+    get_all_profiles_quota,
+    get_watchlist,
+    replace_watchlist,
+    get_schedule_settings,
+    save_schedule_settings,
+)
+from inspection import progress_store
 from profiles import load_profiles_from_json, get_all_profiles, preview_url_profiles
+from services import clean_url_list, create_and_run_check, CheckCreationError
+from scheduler import init_scheduler, reload_schedule, stop_scheduler
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="GSC Indexation Checker")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    await load_profiles_from_json()
+    await run_retention_cleanup()
+    init_scheduler()
+    await reload_schedule()
+    logger.info("Startup complete.")
+    yield
+    stop_scheduler()
+
+
+app = FastAPI(title="GSC Indexation Checker", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -30,14 +56,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.on_event("startup")
-async def startup():
-    await init_db()
-    await load_profiles_from_json()
-    await run_retention_cleanup()
-    logger.info("Database initialized and retention cleanup complete.")
 
 
 # --- Models ---
@@ -58,28 +76,17 @@ class PreviewRequest(BaseModel):
     urls: list[str]
 
 
-# --- Helpers ---
-
-def validate_url(url: str) -> bool:
-    try:
-        result = urlparse(url)
-        return all([result.scheme in ("http", "https"), result.netloc])
-    except Exception:
-        return False
+class WatchlistRequest(BaseModel):
+    urls: list[str]
 
 
-def clean_url_list(raw_urls: list[str]) -> list[str]:
-    """Strip whitespace, remove blanks, deduplicate, validate."""
-    seen = set()
-    cleaned = []
-    for url in raw_urls:
-        url = url.strip()
-        if not url or url in seen:
-            continue
-        if validate_url(url):
-            seen.add(url)
-            cleaned.append(url)
-    return cleaned
+class ScheduleRequest(BaseModel):
+    times: list[str]
+    timezone: str
+    enabled: bool
+
+
+TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
 
 # --- Profile Endpoints ---
@@ -169,42 +176,10 @@ async def preview_profiles(request: PreviewRequest):
 @app.post("/api/checks")
 async def create_check(request: CheckRequest):
     """Submit URL list to start an inspection run."""
-    urls = request.urls
-
-    if not urls:
-        raise HTTPException(status_code=400, detail="No URLs provided")
-
-    cleaned = clean_url_list(urls)
-    if not cleaned:
-        raise HTTPException(status_code=400, detail="No valid URLs after validation")
-
-    # Quota check (aggregate across all profiles)
-    used = await get_daily_quota_used()
-    remaining = DAILY_QUOTA_LIMIT - used
-    if len(cleaned) > remaining:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Batch of {len(cleaned)} URLs exceeds remaining daily quota of {remaining}. "
-                   f"Used {used}/{DAILY_QUOTA_LIMIT} today.",
-        )
-
-    # Create check record
-    now = datetime.now(timezone.utc).isoformat()
-    db = await get_db()
     try:
-        cursor = await db.execute(
-            "INSERT INTO checks (created_at, url_count, property_url, status) VALUES (?, ?, ?, 'running')",
-            (now, len(cleaned), GSC_PROPERTY_URL),
-        )
-        check_id = cursor.lastrowid
-        await db.commit()
-    finally:
-        await db.close()
-
-    # Launch background inspection
-    asyncio.create_task(run_inspection(check_id, cleaned))
-
-    return {"check_id": check_id, "url_count": len(cleaned), "status": "running"}
+        return await create_and_run_check(request.urls, source="manual")
+    except CheckCreationError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
 
 
 @app.post("/api/checks/upload")
@@ -212,36 +187,10 @@ async def create_check_upload(file: UploadFile = File(...)):
     """Submit URL list via file upload."""
     content = await file.read()
     urls = content.decode("utf-8").splitlines()
-
-    if not urls:
-        raise HTTPException(status_code=400, detail="No URLs provided")
-
-    cleaned = clean_url_list(urls)
-    if not cleaned:
-        raise HTTPException(status_code=400, detail="No valid URLs after validation")
-
-    used = await get_daily_quota_used()
-    remaining = DAILY_QUOTA_LIMIT - used
-    if len(cleaned) > remaining:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Batch of {len(cleaned)} URLs exceeds remaining daily quota of {remaining}.",
-        )
-
-    now = datetime.now(timezone.utc).isoformat()
-    db = await get_db()
     try:
-        cursor = await db.execute(
-            "INSERT INTO checks (created_at, url_count, property_url, status) VALUES (?, ?, ?, 'running')",
-            (now, len(cleaned), GSC_PROPERTY_URL),
-        )
-        check_id = cursor.lastrowid
-        await db.commit()
-    finally:
-        await db.close()
-
-    asyncio.create_task(run_inspection(check_id, cleaned))
-    return {"check_id": check_id, "url_count": len(cleaned), "status": "running"}
+        return await create_and_run_check(urls, source="manual")
+    except CheckCreationError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
 
 
 @app.get("/api/checks")
@@ -250,7 +199,7 @@ async def list_checks():
     db = await get_db()
     try:
         cursor = await db.execute(
-            """SELECT c.id, c.created_at, c.url_count, c.property_url, c.status, c.elapsed_seconds,
+            """SELECT c.id, c.created_at, c.url_count, c.property_url, c.status, c.elapsed_seconds, c.source,
                       COALESCE(SUM(CASE WHEN r.verdict = 'PASS' THEN 1 ELSE 0 END), 0) as indexed_count,
                       COALESCE(SUM(CASE WHEN r.verdict IS NOT NULL AND r.verdict != 'PASS' AND r.error IS NULL THEN 1 ELSE 0 END), 0) as not_indexed_count,
                       COALESCE(SUM(CASE WHEN r.error IS NOT NULL THEN 1 ELSE 0 END), 0) as error_count
@@ -268,9 +217,10 @@ async def list_checks():
                 "property_url": row[3],
                 "status": row[4],
                 "elapsed_seconds": row[5],
-                "indexed_count": row[6],
-                "not_indexed_count": row[7],
-                "error_count": row[8],
+                "source": row[6],
+                "indexed_count": row[7],
+                "not_indexed_count": row[8],
+                "error_count": row[9],
             }
             for row in rows
         ]
@@ -283,7 +233,10 @@ async def get_check(check_id: int):
     """Get check details and all results."""
     db = await get_db()
     try:
-        cursor = await db.execute("SELECT * FROM checks WHERE id = ?", (check_id,))
+        cursor = await db.execute(
+            "SELECT id, created_at, url_count, property_url, status, elapsed_seconds, source FROM checks WHERE id = ?",
+            (check_id,),
+        )
         check = await cursor.fetchone()
         if not check:
             raise HTTPException(status_code=404, detail="Check not found")
@@ -309,6 +262,7 @@ async def get_check(check_id: int):
             "property_url": check[3],
             "status": check[4],
             "elapsed_seconds": check[5],
+            "source": check[6],
             "results": [
                 {
                     "id": r[0],
@@ -478,6 +432,66 @@ async def url_lookup(url: str):
         return {"url_id": row[0]}
     finally:
         await db.close()
+
+
+@app.get("/api/watchlist")
+async def read_watchlist():
+    """Return the saved watchlist used by the twice-daily scheduled run."""
+    urls = await get_watchlist()
+    return {"urls": urls, "count": len(urls)}
+
+
+@app.put("/api/watchlist")
+async def update_watchlist(request: WatchlistRequest):
+    """Replace the watchlist with a new set of URLs. Invalid URLs are dropped."""
+    cleaned = clean_url_list(request.urls)
+    count = await replace_watchlist(cleaned)
+    return {
+        "urls": cleaned,
+        "count": count,
+        "rejected": max(0, len(request.urls) - len(cleaned)),
+    }
+
+
+@app.get("/api/schedule")
+async def read_schedule():
+    """Return the current schedule settings (times, timezone, enabled)."""
+    return await get_schedule_settings()
+
+
+@app.put("/api/schedule")
+async def update_schedule(request: ScheduleRequest):
+    """Update the schedule settings and hot-reload cron jobs. No restart."""
+    cleaned_times = []
+    seen = set()
+    for raw in request.times:
+        t = (raw or "").strip()
+        if not t:
+            continue
+        if not TIME_RE.match(t):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid time format: {raw!r} (expected HH:MM)",
+            )
+        # Normalize "9:00" -> "09:00"
+        hour_str, minute_str = t.split(":")
+        normalized = f"{int(hour_str):02d}:{int(minute_str):02d}"
+        if normalized not in seen:
+            seen.add(normalized)
+            cleaned_times.append(normalized)
+    cleaned_times.sort()
+
+    try:
+        ZoneInfo(request.timezone)
+    except ZoneInfoNotFoundError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid timezone: {request.timezone}",
+        )
+
+    await save_schedule_settings(cleaned_times, request.timezone, request.enabled)
+    await reload_schedule()
+    return await get_schedule_settings()
 
 
 @app.get("/api/quota")
