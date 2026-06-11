@@ -9,9 +9,9 @@ from googleapiclient.errors import HttpError
 from gsc_auth import get_searchconsole_service
 from database import (
     get_db, increment_quota_usage, force_quota_exhausted,
-    increment_profile_quota_usage, force_profile_quota_exhausted,
+    increment_property_quota_usage, force_property_quota_exhausted,
 )
-from profiles import get_all_profiles, group_urls_by_profile
+from properties import get_all_properties, group_urls_by_property
 from config import GSC_PROPERTY_URL, CONCURRENCY_LIMIT, MAX_REQUESTS_PER_MINUTE, DAILY_QUOTA_LIMIT
 
 logger = logging.getLogger(__name__)
@@ -131,35 +131,35 @@ async def _process_single_url(
     prev_verdict: Optional[str],
     progress: dict,
     quota_exhausted: asyncio.Event,
-    profile_id: int = None,
+    property_id: int = None,
+    property_url: str = None,
 ):
     """Process a single URL: inspect via API and store result."""
-    # Check if quota was exhausted by another worker
     if quota_exhausted.is_set():
         await db.execute(
             """INSERT INTO results
                (check_id, url_id, coverage_state, verdict, last_crawl_time,
                 crawled_as, google_canonical, user_canonical, referring_sitemaps,
-                status_changed, error, profile_id)
+                status_changed, error, property_id)
                VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, ?, ?)""",
-            (check_id, url_id, "Quota exhausted", profile_id),
+            (check_id, url_id, "Quota exhausted", property_id),
         )
         progress["completed"] += 1
         return
 
+    site_url = property_url or GSC_PROPERTY_URL
+
     try:
-        # Rate limit, then acquire service only for the API call
         await rate_limiter.acquire()
 
         service = await service_pool.get()
         try:
-            response = await loop.run_in_executor(None, inspect_url, service, url, GSC_PROPERTY_URL)
+            response = await loop.run_in_executor(None, inspect_url, service, url, site_url)
         finally:
             await service_pool.put(service)
 
         parsed = parse_inspection_result(response)
 
-        # Transition detection
         status_changed = False
         current_verdict = parsed["verdict"]
         if prev_verdict is not None and current_verdict is not None:
@@ -167,7 +167,6 @@ async def _process_single_url(
             is_indexed = current_verdict == "PASS"
             if was_indexed != is_indexed:
                 status_changed = True
-                # Indexed -> Deindexed transition
                 if was_indexed and not is_indexed:
                     await db.execute(
                         "UPDATE urls SET deindex_count = deindex_count + 1 WHERE id = ?",
@@ -178,7 +177,7 @@ async def _process_single_url(
             """INSERT INTO results
                (check_id, url_id, coverage_state, verdict, last_crawl_time,
                 crawled_as, google_canonical, user_canonical, referring_sitemaps,
-                status_changed, error, profile_id)
+                status_changed, error, property_id)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)""",
             (
                 check_id,
@@ -191,15 +190,15 @@ async def _process_single_url(
                 parsed["user_canonical"],
                 parsed["referring_sitemaps"],
                 status_changed,
-                profile_id,
+                property_id,
             ),
         )
 
     except HttpError as e:
         if e.resp.status == 429:
             logger.warning(f"Google API returned 429 for {url}. Quota exhausted on Google side.")
-            if profile_id:
-                await force_profile_quota_exhausted(db, profile_id)
+            if property_id:
+                await force_property_quota_exhausted(db, property_id)
             else:
                 await force_quota_exhausted(db)
             quota_exhausted.set()
@@ -207,9 +206,9 @@ async def _process_single_url(
                 """INSERT INTO results
                    (check_id, url_id, coverage_state, verdict, last_crawl_time,
                     crawled_as, google_canonical, user_canonical, referring_sitemaps,
-                    status_changed, error, profile_id)
+                    status_changed, error, property_id)
                    VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, ?, ?)""",
-                (check_id, url_id, "Google quota exhausted (HTTP 429)", profile_id),
+                (check_id, url_id, "Google quota exhausted (HTTP 429)", property_id),
             )
         else:
             logger.error(f"Inspection failed for {url}: {e}")
@@ -217,9 +216,9 @@ async def _process_single_url(
                 """INSERT INTO results
                    (check_id, url_id, coverage_state, verdict, last_crawl_time,
                     crawled_as, google_canonical, user_canonical, referring_sitemaps,
-                    status_changed, error, profile_id)
+                    status_changed, error, property_id)
                    VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, ?, ?)""",
-                (check_id, url_id, str(e), profile_id),
+                (check_id, url_id, str(e), property_id),
             )
 
     except Exception as e:
@@ -228,16 +227,21 @@ async def _process_single_url(
             """INSERT INTO results
                (check_id, url_id, coverage_state, verdict, last_crawl_time,
                 crawled_as, google_canonical, user_canonical, referring_sitemaps,
-                status_changed, error, profile_id)
+                status_changed, error, property_id)
                VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, ?, ?)""",
-            (check_id, url_id, str(e), profile_id),
+            (check_id, url_id, str(e), property_id),
         )
 
     progress["completed"] += 1
 
 
 async def run_inspection(check_id: int, urls: list[str]):
-    """Run inspection for all URLs concurrently with per-profile service pools."""
+    """Inspect URLs, routing each to its matching Search Console property.
+
+    One shared OAuth credential is used for every request — quota is enforced
+    by Google at the property (siteUrl) level, so running against multiple
+    properties in one check unlocks 2000/day per property.
+    """
     loop = asyncio.get_event_loop()
     start_time = time.monotonic()
     progress = {"completed": 0, "total": len(urls), "status": "running", "elapsed_seconds": 0.0, "started_at": start_time}
@@ -245,73 +249,54 @@ async def run_inspection(check_id: int, urls: list[str]):
 
     db = await get_db()
     try:
-        # Batch pre-process: upsert all URLs, fetch IDs and previous verdicts
         url_info = await _batch_preprocess_urls(db, urls)
 
-        # Load profiles and group URLs
-        profiles = await get_all_profiles(db)
+        properties = await get_all_properties(db)
 
-        if profiles:
-            # Multi-profile mode: group URLs by profile
-            grouped, unmatched = group_urls_by_profile(urls, profiles)
-            profiles_by_id = {p["id"]: p for p in profiles}
+        if properties:
+            grouped, unmatched = group_urls_by_property(urls, properties)
+            props_by_id = {p["id"]: p for p in properties}
 
-            # Reserve quota per profile upfront
-            for pid, profile_urls in grouped.items():
-                count = len(profile_urls)
-                current_used = await increment_profile_quota_usage(db, pid, count)
+            for pid, prop_urls in grouped.items():
+                current_used = await increment_property_quota_usage(db, pid, len(prop_urls))
                 if current_used > DAILY_QUOTA_LIMIT:
-                    logger.warning(f"Profile {pid} quota would be exhausted: {current_used}/{DAILY_QUOTA_LIMIT}")
+                    logger.warning(f"Property {pid} quota would be exhausted: {current_used}/{DAILY_QUOTA_LIMIT}")
 
-            # Create per-profile service pools and rate limiters
-            service_pools: dict[int, asyncio.Queue] = {}
-            rate_limiters: dict[int, RateLimiter] = {}
-            quota_events: dict[int, asyncio.Event] = {}
+            try:
+                service_pool = await _create_service_pool(loop, CONCURRENCY_LIMIT)
+            except Exception as e:
+                logger.error(f"Failed to initialize GSC service pool: {e}")
+                elapsed = time.monotonic() - start_time
+                progress_store[check_id]["status"] = "error"
+                progress_store[check_id]["elapsed_seconds"] = elapsed
+                await db.execute(
+                    "UPDATE checks SET status = 'error', elapsed_seconds = ? WHERE id = ?",
+                    (elapsed, check_id),
+                )
+                await db.commit()
+                await db.close()
+                return
 
-            for pid, profile_urls in grouped.items():
-                profile = profiles_by_id[pid]
-                try:
-                    pool = await _create_service_pool(
-                        loop, min(CONCURRENCY_LIMIT, len(profile_urls)),
-                        credentials_path=profile["credentials_path"],
-                        token_path=profile["token_path"],
-                    )
-                    service_pools[pid] = pool
-                    rate_limiters[pid] = RateLimiter(MAX_REQUESTS_PER_MINUTE / 60.0)
-                    quota_events[pid] = asyncio.Event()
-                except Exception as e:
-                    logger.error(f"Failed to init service pool for profile '{profile['name']}': {e}")
-                    for url in profile_urls:
-                        info = url_info.get(url)
-                        if info:
-                            await db.execute(
-                                """INSERT INTO results
-                                   (check_id, url_id, coverage_state, verdict, last_crawl_time,
-                                    crawled_as, google_canonical, user_canonical, referring_sitemaps,
-                                    status_changed, error, profile_id)
-                                   VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, ?, ?)""",
-                                (check_id, info["url_id"], f"Profile '{profile['name']}' auth failed: {e}", pid),
-                            )
-                        progress["completed"] += 1
-                    await db.commit()
+            rate_limiter = RateLimiter(MAX_REQUESTS_PER_MINUTE / 60.0)
+            # One quota-exhausted event per property — a 429 on /en/ must not
+            # halt inspection of /th/ URLs.
+            quota_events: dict[int, asyncio.Event] = {pid: asyncio.Event() for pid in grouped}
 
-            # Build tasks for all profiled URLs
             tasks = []
-            for pid, profile_urls in grouped.items():
-                if pid not in service_pools:
-                    continue
-                for url in profile_urls:
+            for pid, prop_urls in grouped.items():
+                site_url = props_by_id[pid]["site_url"]
+                for url in prop_urls:
                     info = url_info.get(url, {})
                     tasks.append(
                         _process_single_url(
-                            loop, db, service_pools[pid], rate_limiters[pid],
+                            loop, db, service_pool, rate_limiter,
                             check_id, url, info.get("url_id"), info.get("prev_verdict"),
                             progress, quota_events[pid],
-                            profile_id=pid,
+                            property_id=pid,
+                            property_url=site_url,
                         )
                     )
 
-            # Handle unmatched URLs — insert error results
             for url in unmatched:
                 info = url_info.get(url)
                 if info:
@@ -319,19 +304,16 @@ async def run_inspection(check_id: int, urls: list[str]):
                         """INSERT INTO results
                            (check_id, url_id, coverage_state, verdict, last_crawl_time,
                             crawled_as, google_canonical, user_canonical, referring_sitemaps,
-                            status_changed, error, profile_id)
+                            status_changed, error, property_id)
                            VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, ?, NULL)""",
-                        (check_id, info["url_id"], "No matching profile for URL path"),
+                        (check_id, info["url_id"], "No matching property for URL path"),
                     )
                 progress["completed"] += 1
             await db.commit()
 
-            # Run all profiled URL tasks concurrently
             await asyncio.gather(*tasks, return_exceptions=True)
 
         else:
-            # Legacy single-credential mode (no profiles configured)
-            # Reserve quota upfront for entire batch
             current_used = await increment_quota_usage(db, count=len(urls))
             if current_used > DAILY_QUOTA_LIMIT:
                 logger.warning(f"Quota would be exhausted: {current_used}/{DAILY_QUOTA_LIMIT}")

@@ -36,6 +36,18 @@ export async function getCheck(id) {
   return request(`/api/checks/${id}`);
 }
 
+export async function deleteCheck(id) {
+  return request(`/api/checks/${id}`, { method: "DELETE" });
+}
+
+export async function deleteChecksBulk(ids) {
+  return request("/api/checks/delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids }),
+  });
+}
+
 export async function getQuota() {
   return request("/api/quota");
 }
@@ -61,34 +73,34 @@ export function subscribeProgress(checkId, onMessage) {
   return es;
 }
 
-// --- Profiles ---
+// --- Properties ---
 
-export async function getProfiles() {
-  return request("/api/profiles");
+export async function getProperties() {
+  return request("/api/properties");
 }
 
-export async function createProfile(profile) {
-  return request("/api/profiles", {
+export async function createProperty(property) {
+  return request("/api/properties", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(profile),
+    body: JSON.stringify(property),
   });
 }
 
-export async function updateProfile(id, profile) {
-  return request(`/api/profiles/${id}`, {
+export async function updateProperty(id, property) {
+  return request(`/api/properties/${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(profile),
+    body: JSON.stringify(property),
   });
 }
 
-export async function deleteProfile(id) {
-  return request(`/api/profiles/${id}`, { method: "DELETE" });
+export async function deleteProperty(id) {
+  return request(`/api/properties/${id}`, { method: "DELETE" });
 }
 
-export async function previewProfiles(urls) {
-  return request("/api/profiles/preview", {
+export async function previewProperties(urls) {
+  return request("/api/properties/preview", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ urls }),

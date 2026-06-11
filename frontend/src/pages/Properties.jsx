@@ -1,38 +1,38 @@
 import { useState, useEffect } from "react";
-import { getProfiles, createProfile, updateProfile, deleteProfile } from "../api/client";
+import { getProperties, createProperty, updateProperty, deleteProperty } from "../api/client";
 
-const emptyForm = { name: "", path_pattern: "", credentials_path: "", token_path: "", sort_order: 0 };
+const emptyForm = { name: "", site_url: "", path_pattern: "", sort_order: 0 };
 
-export default function Profiles() {
-  const [profiles, setProfiles] = useState([]);
+export default function Properties() {
+  const [properties, setProperties] = useState([]);
   const [loading, setLoading] = useState(true);
   const [form, setForm] = useState(emptyForm);
   const [editingId, setEditingId] = useState(null);
   const [error, setError] = useState(null);
   const [showForm, setShowForm] = useState(false);
 
-  const fetchProfiles = () => {
-    getProfiles()
-      .then(setProfiles)
+  const fetchProperties = () => {
+    getProperties()
+      .then(setProperties)
       .catch(() => {})
       .finally(() => setLoading(false));
   };
 
-  useEffect(() => { fetchProfiles(); }, []);
+  useEffect(() => { fetchProperties(); }, []);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError(null);
     try {
       if (editingId) {
-        await updateProfile(editingId, form);
+        await updateProperty(editingId, form);
       } else {
-        await createProfile(form);
+        await createProperty(form);
       }
       setForm(emptyForm);
       setEditingId(null);
       setShowForm(false);
-      fetchProfiles();
+      fetchProperties();
     } catch (err) {
       setError(err.message);
     }
@@ -41,9 +41,8 @@ export default function Profiles() {
   const handleEdit = (p) => {
     setForm({
       name: p.name,
+      site_url: p.site_url,
       path_pattern: p.path_pattern,
-      credentials_path: p.credentials_path,
-      token_path: p.token_path,
       sort_order: p.sort_order,
     });
     setEditingId(p.id);
@@ -52,10 +51,10 @@ export default function Profiles() {
   };
 
   const handleDelete = async (p) => {
-    if (!window.confirm(`Delete profile "${p.name}"?`)) return;
+    if (!window.confirm(`Delete property "${p.name}"?`)) return;
     try {
-      await deleteProfile(p.id);
-      fetchProfiles();
+      await deleteProperty(p.id);
+      fetchProperties();
     } catch (err) {
       setError(err.message);
     }
@@ -74,22 +73,21 @@ export default function Profiles() {
     <div>
       <div className="card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-          <h2 style={{ margin: 0 }}>Credential Profiles</h2>
+          <h2 style={{ margin: 0 }}>Search Console Properties</h2>
           {!showForm && (
             <button className="btn btn-primary" onClick={() => { setShowForm(true); setEditingId(null); setForm(emptyForm); }}>
-              Add Profile
+              Add Property
             </button>
           )}
         </div>
 
         <p style={{ color: "#999", fontSize: 14, marginBottom: 16 }}>
-          Each profile uses a separate Google Cloud project credential, giving you an additional 2,000 inspections/day per profile.
-          URLs are matched to profiles by path pattern (sorted by priority order).
+          Each verified Search Console property has its own 2,000/day URL Inspection quota. Configure one row per property and route URLs via path pattern — URLs for <code>/en/*</code> use the <code>/en/</code> property's quota, <code>/th/*</code> uses the <code>/th/</code> property's, etc. Lower priority = matched first (use it to put more specific patterns before broader ones).
         </p>
 
-        {profiles.length === 0 && !showForm ? (
+        {properties.length === 0 && !showForm ? (
           <p style={{ color: "#999" }}>
-            No profiles configured. The tool will use the default credentials from .env.
+            No properties configured. The tool will fall back to the single property set in <code>GSC_PROPERTY_URL</code>.
           </p>
         ) : (
           <div className="results-table-wrapper">
@@ -98,20 +96,18 @@ export default function Profiles() {
                 <tr>
                   <th>Priority</th>
                   <th>Name</th>
+                  <th>Site URL</th>
                   <th>Path Pattern</th>
-                  <th>Credentials File</th>
-                  <th>Token File</th>
                   <th style={{ width: 120 }}>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {profiles.map((p) => (
+                {properties.map((p) => (
                   <tr key={p.id}>
                     <td>{p.sort_order}</td>
                     <td><strong>{p.name}</strong></td>
+                    <td><code>{p.site_url}</code></td>
                     <td><code>{p.path_pattern}</code></td>
-                    <td><code>{p.credentials_path}</code></td>
-                    <td><code>{p.token_path}</code></td>
                     <td>
                       <button className="btn btn-secondary btn-sm" onClick={() => handleEdit(p)} style={{ marginRight: 4 }}>
                         Edit
@@ -122,10 +118,10 @@ export default function Profiles() {
                     </td>
                   </tr>
                 ))}
-                {profiles.length === 0 && (
+                {properties.length === 0 && (
                   <tr>
-                    <td colSpan={6} style={{ textAlign: "center", color: "#999" }}>
-                      No profiles yet.
+                    <td colSpan={5} style={{ textAlign: "center", color: "#999" }}>
+                      No properties yet.
                     </td>
                   </tr>
                 )}
@@ -137,7 +133,7 @@ export default function Profiles() {
 
       {showForm && (
         <div className="card" style={{ marginTop: 16 }}>
-          <h3>{editingId ? "Edit Profile" : "Add Profile"}</h3>
+          <h3>{editingId ? "Edit Property" : "Add Property"}</h3>
           <form onSubmit={handleSubmit}>
             <div className="form-grid">
               <div className="form-field">
@@ -151,32 +147,22 @@ export default function Profiles() {
                 />
               </div>
               <div className="form-field">
+                <label>Site URL (GSC property identifier)</label>
+                <input
+                  type="text"
+                  value={form.site_url}
+                  onChange={(e) => setForm({ ...form, site_url: e.target.value })}
+                  placeholder="e.g. https://www.tmgm.com/en/ or sc-domain:tmgm.com"
+                  required
+                />
+              </div>
+              <div className="form-field">
                 <label>Path Pattern</label>
                 <input
                   type="text"
                   value={form.path_pattern}
                   onChange={(e) => setForm({ ...form, path_pattern: e.target.value })}
                   placeholder="e.g. /en/*"
-                  required
-                />
-              </div>
-              <div className="form-field">
-                <label>Credentials File</label>
-                <input
-                  type="text"
-                  value={form.credentials_path}
-                  onChange={(e) => setForm({ ...form, credentials_path: e.target.value })}
-                  placeholder="e.g. ./credentials-en.json"
-                  required
-                />
-              </div>
-              <div className="form-field">
-                <label>Token File</label>
-                <input
-                  type="text"
-                  value={form.token_path}
-                  onChange={(e) => setForm({ ...form, token_path: e.target.value })}
-                  placeholder="e.g. ./token-en.json"
                   required
                 />
               </div>

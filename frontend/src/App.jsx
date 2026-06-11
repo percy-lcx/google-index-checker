@@ -3,7 +3,7 @@ import NewCheck from "./pages/NewCheck";
 import CheckResult from "./pages/CheckResult";
 import CheckHistory from "./pages/CheckHistory";
 import UrlDetail from "./pages/UrlDetail";
-import Profiles from "./pages/Profiles";
+import Properties from "./pages/Properties";
 import Watchlist from "./pages/Watchlist";
 import Schedule from "./pages/Schedule";
 import "./App.css";
@@ -19,7 +19,7 @@ function App() {
             <Link to="/history">History</Link>
             <Link to="/watchlist">Watchlist</Link>
             <Link to="/schedule">Schedule</Link>
-            <Link to="/profiles">Profiles</Link>
+            <Link to="/properties">Properties</Link>
           </nav>
         </header>
         <main className="app-main">
@@ -30,7 +30,7 @@ function App() {
             <Route path="/watchlist" element={<Watchlist />} />
             <Route path="/schedule" element={<Schedule />} />
             <Route path="/urls/:urlString" element={<UrlDetail />} />
-            <Route path="/profiles" element={<Profiles />} />
+            <Route path="/properties" element={<Properties />} />
           </Routes>
         </main>
       </div>

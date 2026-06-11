@@ -20,14 +20,14 @@ from database import (
     get_db,
     get_daily_quota_used,
     run_retention_cleanup,
-    get_all_profiles_quota,
+    get_all_properties_quota,
     get_watchlist,
     replace_watchlist,
     get_schedule_settings,
     save_schedule_settings,
 )
 from inspection import progress_store
-from profiles import load_profiles_from_json, get_all_profiles, preview_url_profiles
+from properties import get_all_properties, preview_url_properties
 from services import clean_url_list, create_and_run_check, CheckCreationError
 from scheduler import init_scheduler, reload_schedule, stop_scheduler
 
@@ -38,7 +38,6 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    await load_profiles_from_json()
     await run_retention_cleanup()
     init_scheduler()
     await reload_schedule()
@@ -64,11 +63,14 @@ class CheckRequest(BaseModel):
     urls: list[str]
 
 
-class ProfileRequest(BaseModel):
+class BulkDeleteChecksRequest(BaseModel):
+    ids: list[int]
+
+
+class PropertyRequest(BaseModel):
     name: str
+    site_url: str
     path_pattern: str
-    credentials_path: str
-    token_path: str
     sort_order: int = 0
 
 
@@ -89,84 +91,83 @@ class ScheduleRequest(BaseModel):
 TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
 
-# --- Profile Endpoints ---
+# --- Property Endpoints ---
 
-@app.get("/api/profiles")
-async def list_profiles():
-    """List all credential profiles."""
+@app.get("/api/properties")
+async def list_properties():
+    """List all Search Console properties (each has its own 2000/day URL Inspection quota)."""
     db = await get_db()
     try:
-        profiles = await get_all_profiles(db)
-        return profiles
+        return await get_all_properties(db)
     finally:
         await db.close()
 
 
-@app.post("/api/profiles")
-async def create_profile(request: ProfileRequest):
-    """Create a new credential profile."""
+@app.post("/api/properties")
+async def create_property(request: PropertyRequest):
+    """Create a new Search Console property entry."""
     db = await get_db()
     try:
         cursor = await db.execute(
-            """INSERT INTO profiles (name, path_pattern, credentials_path, token_path, sort_order)
-               VALUES (?, ?, ?, ?, ?)""",
-            (request.name, request.path_pattern, request.credentials_path, request.token_path, request.sort_order),
+            """INSERT INTO properties (name, site_url, path_pattern, sort_order)
+               VALUES (?, ?, ?, ?)""",
+            (request.name, request.site_url, request.path_pattern, request.sort_order),
         )
-        profile_id = cursor.lastrowid
+        property_id = cursor.lastrowid
         await db.commit()
-        return {"id": profile_id, **request.model_dump()}
+        return {"id": property_id, **request.model_dump()}
     except Exception as e:
         if "UNIQUE constraint" in str(e):
-            raise HTTPException(status_code=409, detail=f"Profile name '{request.name}' already exists")
+            raise HTTPException(status_code=409, detail=f"Property name '{request.name}' already exists")
         raise
     finally:
         await db.close()
 
 
-@app.put("/api/profiles/{profile_id}")
-async def update_profile(profile_id: int, request: ProfileRequest):
-    """Update an existing credential profile."""
+@app.put("/api/properties/{property_id}")
+async def update_property(property_id: int, request: PropertyRequest):
+    """Update an existing property entry."""
     db = await get_db()
     try:
-        cursor = await db.execute("SELECT id FROM profiles WHERE id = ?", (profile_id,))
+        cursor = await db.execute("SELECT id FROM properties WHERE id = ?", (property_id,))
         if not await cursor.fetchone():
-            raise HTTPException(status_code=404, detail="Profile not found")
+            raise HTTPException(status_code=404, detail="Property not found")
 
         await db.execute(
-            """UPDATE profiles SET name = ?, path_pattern = ?, credentials_path = ?,
-               token_path = ?, sort_order = ? WHERE id = ?""",
-            (request.name, request.path_pattern, request.credentials_path, request.token_path, request.sort_order, profile_id),
+            """UPDATE properties SET name = ?, site_url = ?, path_pattern = ?, sort_order = ?
+               WHERE id = ?""",
+            (request.name, request.site_url, request.path_pattern, request.sort_order, property_id),
         )
         await db.commit()
-        return {"id": profile_id, **request.model_dump()}
+        return {"id": property_id, **request.model_dump()}
     finally:
         await db.close()
 
 
-@app.delete("/api/profiles/{profile_id}")
-async def delete_profile(profile_id: int):
-    """Delete a credential profile."""
+@app.delete("/api/properties/{property_id}")
+async def delete_property(property_id: int):
+    """Delete a property entry."""
     db = await get_db()
     try:
-        cursor = await db.execute("SELECT id FROM profiles WHERE id = ?", (profile_id,))
+        cursor = await db.execute("SELECT id FROM properties WHERE id = ?", (property_id,))
         if not await cursor.fetchone():
-            raise HTTPException(status_code=404, detail="Profile not found")
+            raise HTTPException(status_code=404, detail="Property not found")
 
-        await db.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+        await db.execute("DELETE FROM properties WHERE id = ?", (property_id,))
         await db.commit()
         return {"deleted": True}
     finally:
         await db.close()
 
 
-@app.post("/api/profiles/preview")
-async def preview_profiles(request: PreviewRequest):
-    """Preview which profile each URL maps to."""
+@app.post("/api/properties/preview")
+async def preview_properties(request: PreviewRequest):
+    """Preview which property each URL would route to."""
     cleaned = clean_url_list(request.urls)
     db = await get_db()
     try:
-        profiles = await get_all_profiles(db)
-        return preview_url_profiles(cleaned, profiles)
+        properties = await get_all_properties(db)
+        return preview_url_properties(cleaned, properties)
     finally:
         await db.close()
 
@@ -245,10 +246,10 @@ async def get_check(check_id: int):
             """SELECT r.id, u.url, r.coverage_state, r.verdict, r.last_crawl_time,
                       r.crawled_as, r.google_canonical, r.user_canonical,
                       r.referring_sitemaps, r.status_changed, r.error, u.deindex_count,
-                      r.profile_id, p.name as profile_name
+                      r.property_id, p.name as property_name
                FROM results r
                JOIN urls u ON r.url_id = u.id
-               LEFT JOIN profiles p ON r.profile_id = p.id
+               LEFT JOIN properties p ON r.property_id = p.id
                WHERE r.check_id = ?
                ORDER BY r.id""",
             (check_id,),
@@ -277,12 +278,55 @@ async def get_check(check_id: int):
                     "status_changed": bool(r[9]),
                     "error": r[10],
                     "deindex_count": r[11],
-                    "profile_id": r[12],
-                    "profile_name": r[13],
+                    "property_id": r[12],
+                    "property_name": r[13],
                 }
                 for r in results
             ],
         }
+    finally:
+        await db.close()
+
+
+@app.delete("/api/checks/{check_id}")
+async def delete_check(check_id: int):
+    """Delete a check run and all its results."""
+    db = await get_db()
+    try:
+        cursor = await db.execute("SELECT id FROM checks WHERE id = ?", (check_id,))
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Check not found")
+
+        await db.execute("DELETE FROM checks WHERE id = ?", (check_id,))
+        await db.commit()
+        progress_store.pop(check_id, None)
+        return {"deleted": True}
+    finally:
+        await db.close()
+
+
+@app.post("/api/checks/delete")
+async def delete_checks_bulk(request: BulkDeleteChecksRequest):
+    """Bulk delete check runs and their results. Skips running checks."""
+    if not request.ids:
+        return {"deleted": 0}
+    db = await get_db()
+    try:
+        placeholders = ",".join("?" * len(request.ids))
+        cursor = await db.execute(
+            f"SELECT id FROM checks WHERE id IN ({placeholders}) AND status != 'running'",
+            request.ids,
+        )
+        deletable = [row[0] for row in await cursor.fetchall()]
+        if deletable:
+            await db.execute(
+                f"DELETE FROM checks WHERE id IN ({','.join('?' * len(deletable))})",
+                deletable,
+            )
+            await db.commit()
+            for cid in deletable:
+                progress_store.pop(cid, None)
+        return {"deleted": len(deletable)}
     finally:
         await db.close()
 
@@ -339,10 +383,10 @@ async def export_check(check_id: int):
             """SELECT u.url, r.coverage_state, r.verdict, r.last_crawl_time,
                       r.crawled_as, r.google_canonical, r.user_canonical,
                       r.referring_sitemaps, r.status_changed, r.error, u.deindex_count,
-                      p.name as profile_name
+                      p.name as property_name
                FROM results r
                JOIN urls u ON r.url_id = u.id
-               LEFT JOIN profiles p ON r.profile_id = p.id
+               LEFT JOIN properties p ON r.property_id = p.id
                WHERE r.check_id = ?
                ORDER BY r.id""",
             (check_id,),
@@ -356,7 +400,7 @@ async def export_check(check_id: int):
     writer.writerow([
         "URL", "Coverage State", "Verdict", "Last Crawl Time",
         "Crawled As", "Google Canonical", "User Canonical",
-        "Referring Sitemaps", "Status Changed", "Error", "Deindex Count", "Profile",
+        "Referring Sitemaps", "Status Changed", "Error", "Deindex Count", "Property",
     ])
     for r in results:
         writer.writerow([r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], bool(r[8]), r[9], r[10], r[11] or ""])
@@ -496,9 +540,9 @@ async def update_schedule(request: ScheduleRequest):
 
 @app.get("/api/quota")
 async def get_quota():
-    """Return remaining daily quota, with per-profile breakdown if profiles exist."""
+    """Return remaining daily quota, with per-property breakdown if any are configured."""
     used = await get_daily_quota_used()
-    profiles_quota = await get_all_profiles_quota()
+    properties_quota = await get_all_properties_quota()
 
     result = {
         "used": used,
@@ -506,20 +550,20 @@ async def get_quota():
         "remaining": DAILY_QUOTA_LIMIT - used,
     }
 
-    if profiles_quota:
-        result["profiles"] = [
+    if properties_quota:
+        result["properties"] = [
             {
-                "profile_id": pq["profile_id"],
+                "property_id": pq["property_id"],
                 "name": pq["name"],
+                "site_url": pq["site_url"],
                 "used": pq["used"],
                 "limit": DAILY_QUOTA_LIMIT,
                 "remaining": DAILY_QUOTA_LIMIT - pq["used"],
             }
-            for pq in profiles_quota
+            for pq in properties_quota
         ]
-        # Total across all profiles
-        result["total_used"] = sum(pq["used"] for pq in profiles_quota)
-        result["total_limit"] = DAILY_QUOTA_LIMIT * len(profiles_quota)
+        result["total_used"] = sum(pq["used"] for pq in properties_quota)
+        result["total_limit"] = DAILY_QUOTA_LIMIT * len(properties_quota)
         result["total_remaining"] = result["total_limit"] - result["total_used"]
 
     return result

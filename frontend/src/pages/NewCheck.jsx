@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { createCheck, uploadCheck, getQuota, getProfiles, previewProfiles } from "../api/client";
+import { createCheck, uploadCheck, getQuota, getProperties, previewProperties } from "../api/client";
 
 function isValidUrl(str) {
   try {
@@ -26,13 +26,13 @@ export default function NewCheck() {
   const [error, setError] = useState(null);
   const [quota, setQuota] = useState(null);
   const [showConfirm, setShowConfirm] = useState(false);
-  const [profiles, setProfiles] = useState([]);
-  const [profilePreview, setProfilePreview] = useState(null);
+  const [properties, setProperties] = useState([]);
+  const [propertyPreview, setPropertyPreview] = useState(null);
   const navigate = useNavigate();
 
   useEffect(() => {
     getQuota().then(setQuota).catch(() => {});
-    getProfiles().then(setProfiles).catch(() => {});
+    getProperties().then(setProperties).catch(() => {});
   }, []);
 
   const validUrls = useMemo(() => parseUrlsFromText(text), [text]);
@@ -53,17 +53,16 @@ export default function NewCheck() {
 
   const urlsToCheck = file ? fileUrls : validUrls;
 
-  // Fetch profile preview when URLs change and profiles exist
   useEffect(() => {
-    if (profiles.length === 0 || urlsToCheck.length === 0) {
-      setProfilePreview(null);
+    if (properties.length === 0 || urlsToCheck.length === 0) {
+      setPropertyPreview(null);
       return;
     }
     const timer = setTimeout(() => {
-      previewProfiles(urlsToCheck).then(setProfilePreview).catch(() => setProfilePreview(null));
+      previewProperties(urlsToCheck).then(setPropertyPreview).catch(() => setPropertyPreview(null));
     }, 500);
     return () => clearTimeout(timer);
-  }, [urlsToCheck, profiles]);
+  }, [urlsToCheck, properties]);
 
   const handleStartClick = async () => {
     setError(null);
@@ -98,23 +97,22 @@ export default function NewCheck() {
     }
   };
 
-  // Compute profile summary from preview
-  const profileSummary = useMemo(() => {
-    if (!profilePreview) return null;
+  const propertySummary = useMemo(() => {
+    if (!propertyPreview) return null;
     const groups = {};
     let unmatched = 0;
-    for (const item of profilePreview) {
-      if (item.profile_name) {
-        groups[item.profile_name] = (groups[item.profile_name] || 0) + 1;
+    for (const item of propertyPreview) {
+      if (item.property_name) {
+        groups[item.property_name] = (groups[item.property_name] || 0) + 1;
       } else {
         unmatched++;
       }
     }
     return { groups, unmatched };
-  }, [profilePreview]);
+  }, [propertyPreview]);
 
-  const quotaWarning =
-    quota && urlsToCheck.length > quota.remaining;
+  const quotaRemaining = quota ? (quota.total_remaining ?? quota.remaining) : null;
+  const quotaWarning = quota && urlsToCheck.length > quotaRemaining;
   const previewUrls = urlsToCheck.slice(0, 5);
   const moreCount = urlsToCheck.length - previewUrls.length;
 
@@ -146,18 +144,17 @@ export default function NewCheck() {
           </p>
         )}
 
-        {/* Profile match preview */}
-        {profileSummary && (
+        {propertySummary && (
           <div className="profile-preview" style={{ marginTop: 12, padding: 12, background: "#f8f9fa", borderRadius: 8 }}>
-            <p style={{ fontWeight: 600, marginBottom: 6, fontSize: 14 }}>Profile matching:</p>
-            {Object.entries(profileSummary.groups).map(([name, count]) => (
+            <p style={{ fontWeight: 600, marginBottom: 6, fontSize: 14 }}>Property routing:</p>
+            {Object.entries(propertySummary.groups).map(([name, count]) => (
               <span key={name} className="badge badge-green" style={{ marginRight: 6, marginBottom: 4 }}>
                 {name}: {count} URL{count !== 1 ? "s" : ""}
               </span>
             ))}
-            {profileSummary.unmatched > 0 && (
+            {propertySummary.unmatched > 0 && (
               <span className="badge badge-red">
-                Unmatched: {profileSummary.unmatched} URL{profileSummary.unmatched !== 1 ? "s" : ""} (will be skipped)
+                Unmatched: {propertySummary.unmatched} URL{propertySummary.unmatched !== 1 ? "s" : ""} (will be skipped)
               </span>
             )}
           </div>
@@ -165,14 +162,14 @@ export default function NewCheck() {
 
         {quota && (
           <div style={{ marginTop: 8 }}>
-            {quota.profiles ? (
+            {quota.properties ? (
               <div className={`quota-info ${quotaWarning ? "quota-warning" : ""}`}>
                 <p style={{ margin: "4px 0" }}>
                   Total quota: {quota.total_used}/{quota.total_limit} used ({quota.total_remaining} remaining)
                 </p>
                 <div style={{ fontSize: 13, color: "#777" }}>
-                  {quota.profiles.map((pq) => (
-                    <span key={pq.profile_id} style={{ marginRight: 12 }}>
+                  {quota.properties.map((pq) => (
+                    <span key={pq.property_id} style={{ marginRight: 12 }}>
                       {pq.name}: {pq.used}/{pq.limit}
                     </span>
                   ))}
@@ -219,17 +216,17 @@ export default function NewCheck() {
               )}
             </div>
 
-            {profileSummary && (
+            {propertySummary && (
               <div style={{ marginBottom: 12 }}>
-                <p className="confirm-label">Profile distribution:</p>
-                {Object.entries(profileSummary.groups).map(([name, count]) => (
+                <p className="confirm-label">Property distribution:</p>
+                {Object.entries(propertySummary.groups).map(([name, count]) => (
                   <div key={name} style={{ fontSize: 14, color: "#555" }}>
                     {name}: {count} URL{count !== 1 ? "s" : ""}
                   </div>
                 ))}
-                {profileSummary.unmatched > 0 && (
+                {propertySummary.unmatched > 0 && (
                   <div style={{ fontSize: 14, color: "#c0392b" }}>
-                    Unmatched: {profileSummary.unmatched} (will be skipped with error)
+                    Unmatched: {propertySummary.unmatched} (will be rejected)
                   </div>
                 )}
               </div>
@@ -237,12 +234,12 @@ export default function NewCheck() {
 
             {quota && (
               <div className="confirm-quota">
-                {quota.profiles ? (
-                  <div>
-                    <p>
-                      Total quota remaining: <strong>{quota.total_remaining}</strong> across {quota.profiles.length} profiles.
-                    </p>
-                  </div>
+                {quota.properties ? (
+                  <p>
+                    This will consume <strong>{urlsToCheck.length}</strong> quota from a pool of{" "}
+                    <strong>{quota.total_remaining}</strong> remaining across{" "}
+                    {quota.properties.length} propert{quota.properties.length !== 1 ? "ies" : "y"}.
+                  </p>
                 ) : (
                   <p>
                     This will consume <strong>{urlsToCheck.length}</strong> quota.

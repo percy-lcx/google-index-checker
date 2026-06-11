@@ -67,20 +67,19 @@ async def init_db():
                 used INTEGER NOT NULL DEFAULT 0
             );
 
-            CREATE TABLE IF NOT EXISTS profiles (
+            CREATE TABLE IF NOT EXISTS properties (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT UNIQUE NOT NULL,
+                site_url TEXT NOT NULL,
                 path_pattern TEXT NOT NULL,
-                credentials_path TEXT NOT NULL,
-                token_path TEXT NOT NULL,
                 sort_order INTEGER NOT NULL DEFAULT 0
             );
 
-            CREATE TABLE IF NOT EXISTS profile_quota_usage (
+            CREATE TABLE IF NOT EXISTS property_quota_usage (
                 date TEXT NOT NULL,
-                profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
                 used INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (date, profile_id)
+                PRIMARY KEY (date, property_id)
             );
 
             CREATE TABLE IF NOT EXISTS watchlist (
@@ -108,12 +107,70 @@ async def init_db():
                 (json.dumps(["07:00", "17:00"]), "Asia/Hong_Kong"),
             )
             await db.commit()
-        # Migration: add profile_id to results if missing
+        # Migration: drop any legacy credentials tables and rebuild results with property_id.
+        # Handles both the original "profiles" schema and the interim "credentials" schema.
+        cursor = await db.execute("PRAGMA table_info(results)")
+        results_cols = [row[1] for row in await cursor.fetchall()]
+        needs_rebuild = (
+            "property_id" not in results_cols
+            and any(col in results_cols for col in ("credential_id", "profile_id"))
+        )
+        if needs_rebuild:
+            await db.executescript("""
+                PRAGMA foreign_keys=OFF;
+
+                CREATE TABLE results_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    check_id INTEGER NOT NULL REFERENCES checks(id) ON DELETE CASCADE,
+                    url_id INTEGER NOT NULL REFERENCES urls(id),
+                    coverage_state TEXT,
+                    verdict TEXT,
+                    last_crawl_time DATETIME,
+                    crawled_as TEXT,
+                    google_canonical TEXT,
+                    user_canonical TEXT,
+                    referring_sitemaps TEXT,
+                    status_changed BOOLEAN DEFAULT 0,
+                    error TEXT,
+                    property_id INTEGER REFERENCES properties(id)
+                );
+
+                INSERT INTO results_new
+                    (id, check_id, url_id, coverage_state, verdict, last_crawl_time,
+                     crawled_as, google_canonical, user_canonical, referring_sitemaps,
+                     status_changed, error, property_id)
+                SELECT
+                    id, check_id, url_id, coverage_state, verdict, last_crawl_time,
+                    crawled_as, google_canonical, user_canonical, referring_sitemaps,
+                    status_changed, error, NULL
+                FROM results;
+
+                DROP TABLE results;
+                ALTER TABLE results_new RENAME TO results;
+
+                CREATE INDEX IF NOT EXISTS idx_results_check_id ON results(check_id);
+                CREATE INDEX IF NOT EXISTS idx_results_url_id ON results(url_id);
+
+                DROP TABLE IF EXISTS credential_quota_usage;
+                DROP TABLE IF EXISTS credentials;
+                DROP TABLE IF EXISTS profile_quota_usage;
+                DROP TABLE IF EXISTS profiles;
+
+                PRAGMA foreign_keys=ON;
+            """)
+            await db.commit()
+
+        # Migration: add property_id to results if missing (fresh-install path)
         cursor = await db.execute("PRAGMA table_info(results)")
         columns = [row[1] for row in await cursor.fetchall()]
-        if "profile_id" not in columns:
-            await db.execute("ALTER TABLE results ADD COLUMN profile_id INTEGER REFERENCES profiles(id)")
+        if "property_id" not in columns:
+            await db.execute("ALTER TABLE results ADD COLUMN property_id INTEGER REFERENCES properties(id)")
             await db.commit()
+
+        # Migration: drop orphan credentials/profiles tables on fresh rebuilds too
+        for legacy_table in ("credential_quota_usage", "credentials", "profile_quota_usage", "profiles"):
+            await db.execute(f"DROP TABLE IF EXISTS {legacy_table}")
+        await db.commit()
 
         # Migration: add elapsed_seconds to checks if missing
         cursor = await db.execute("PRAGMA table_info(checks)")
@@ -265,14 +322,14 @@ async def force_quota_exhausted(db: aiosqlite.Connection):
     await db.commit()
 
 
-async def get_profile_quota_used(profile_id: int) -> int:
-    """Read today's quota usage for a specific profile."""
+async def get_property_quota_used(property_id: int) -> int:
+    """Read today's quota usage for a specific property."""
     today = today_pacific()
     db = await get_db()
     try:
         cursor = await db.execute(
-            "SELECT used FROM profile_quota_usage WHERE date = ? AND profile_id = ?",
-            (today, profile_id),
+            "SELECT used FROM property_quota_usage WHERE date = ? AND property_id = ?",
+            (today, property_id),
         )
         row = await cursor.fetchone()
         return row[0] if row else 0
@@ -280,48 +337,51 @@ async def get_profile_quota_used(profile_id: int) -> int:
         await db.close()
 
 
-async def increment_profile_quota_usage(db: aiosqlite.Connection, profile_id: int, count: int = 1) -> int:
-    """Atomically increment today's quota counter for a profile. Returns new total."""
+async def increment_property_quota_usage(db: aiosqlite.Connection, property_id: int, count: int = 1) -> int:
+    """Atomically increment today's quota counter for a property. Returns new total."""
     today = today_pacific()
     await db.execute(
-        "INSERT INTO profile_quota_usage (date, profile_id, used) VALUES (?, ?, ?) "
-        "ON CONFLICT(date, profile_id) DO UPDATE SET used = used + ?",
-        (today, profile_id, count, count),
+        "INSERT INTO property_quota_usage (date, property_id, used) VALUES (?, ?, ?) "
+        "ON CONFLICT(date, property_id) DO UPDATE SET used = used + ?",
+        (today, property_id, count, count),
     )
     await db.commit()
     cursor = await db.execute(
-        "SELECT used FROM profile_quota_usage WHERE date = ? AND profile_id = ?",
-        (today, profile_id),
+        "SELECT used FROM property_quota_usage WHERE date = ? AND property_id = ?",
+        (today, property_id),
     )
     row = await cursor.fetchone()
     return row[0]
 
 
-async def force_profile_quota_exhausted(db: aiosqlite.Connection, profile_id: int):
-    """Mark today's quota as fully exhausted for a profile."""
+async def force_property_quota_exhausted(db: aiosqlite.Connection, property_id: int):
+    """Mark today's quota as fully exhausted for a property."""
     today = today_pacific()
     await db.execute(
-        "INSERT INTO profile_quota_usage (date, profile_id, used) VALUES (?, ?, ?) "
-        "ON CONFLICT(date, profile_id) DO UPDATE SET used = ?",
-        (today, profile_id, DAILY_QUOTA_LIMIT, DAILY_QUOTA_LIMIT),
+        "INSERT INTO property_quota_usage (date, property_id, used) VALUES (?, ?, ?) "
+        "ON CONFLICT(date, property_id) DO UPDATE SET used = ?",
+        (today, property_id, DAILY_QUOTA_LIMIT, DAILY_QUOTA_LIMIT),
     )
     await db.commit()
 
 
-async def get_all_profiles_quota() -> list[dict]:
-    """Get today's quota usage for all profiles."""
+async def get_all_properties_quota() -> list[dict]:
+    """Get today's quota usage for all properties, ordered by sort_order."""
     today = today_pacific()
     db = await get_db()
     try:
         cursor = await db.execute(
-            """SELECT p.id, p.name, COALESCE(pq.used, 0) as used
-               FROM profiles p
-               LEFT JOIN profile_quota_usage pq ON p.id = pq.profile_id AND pq.date = ?
-               ORDER BY p.sort_order""",
+            """SELECT p.id, p.name, p.site_url, COALESCE(pq.used, 0) as used
+               FROM properties p
+               LEFT JOIN property_quota_usage pq ON p.id = pq.property_id AND pq.date = ?
+               ORDER BY p.sort_order, p.id""",
             (today,),
         )
         rows = await cursor.fetchall()
-        return [{"profile_id": row[0], "name": row[1], "used": row[2]} for row in rows]
+        return [
+            {"property_id": row[0], "name": row[1], "site_url": row[2], "used": row[3]}
+            for row in rows
+        ]
     finally:
         await db.close()
 
