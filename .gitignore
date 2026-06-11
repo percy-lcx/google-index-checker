@@ -13,6 +13,9 @@ frontend/dist/
 
 # App
 *.db
+*.db-shm
+*.db-wal
+*.db.bak*
 credentials.json
 token.json
 .env
@@ -20,3 +23,6 @@ token.json
 # IDE
 .vscode/
 .idea/
+
+# OS
+.DS_Store
