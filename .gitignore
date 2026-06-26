@@ -13,6 +13,8 @@ frontend/dist/
 
 # App
 *.db
+# Track the indexation check history DB (WAL/SHM/backups stay ignored)
+!backend/indexation.db
 *.db-shm
 *.db-wal
 *.db.bak*
